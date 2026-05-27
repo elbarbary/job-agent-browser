@@ -66,6 +66,11 @@ class ApplicationWorkflowTests(unittest.TestCase):
                 workflow.approve_for_manual_submission("abc123").read_text(encoding="utf-8")
             )
             self.assertEqual(approval["execution"], "manual_submission_only")
+            submission = json.loads(
+                workflow.record_autopilot_submission("abc123", {"submitted": True}).read_text(encoding="utf-8")
+            )
+            self.assertEqual(submission["execution"], "autopilot_submit_clicked")
+            self.assertTrue(workflow.repository.has_submission("abc123"))
             audit = recorder.path.read_text(encoding="utf-8")
             self.assertIn("draft_saved_no_submission", audit)
             self.assertIn("approved_manual_submission_required", audit)

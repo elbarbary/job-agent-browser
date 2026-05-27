@@ -35,7 +35,7 @@ def generate_daily_update(settings: Settings) -> Path:
         f"- Jobs found: {len(jobs)}",
         f"- Jobs shortlisted: {len(jobs)}",
         f"- Applications drafted: {len(drafts)}",
-        "- Applications submitted: manually reported only (not automated by this app)",
+        "- Applications submitted: review approval records, worker status, and audit logs",
         f"- Submission approvals recorded: {len(approvals)}",
         "",
         "## Questions Needing Input",

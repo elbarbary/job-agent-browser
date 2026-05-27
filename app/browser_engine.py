@@ -16,6 +16,7 @@ os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
 
 from browser_use import Browser  # noqa: E402  (telemetry opt-out precedes import)
 
+from .autopilot import host_allowed, is_known
 from .config import Settings
 from .policy import RiskClass, assert_action_allowed
 from .webabi.recorder import AuditRecorder
@@ -182,6 +183,109 @@ class BrowserEngine:
         finally:
             await browser.stop()
 
+    async def auto_submit_application(
+        self,
+        url: str,
+        job_id: str,
+        answers: dict[str, Any],
+        autopilot_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or not host_allowed(url, autopilot_config):
+            raise BrowserSafetyError("Autopilot submission host is not privately allowlisted.")
+        assert_action_allowed(RiskClass.JOB_SUBMIT, confirmed=True)
+        browser = self._new_browser(
+            headed=not bool(autopilot_config.get("headless", True)),
+            persistent=True,
+            restricted=False,
+        )
+        errors: list[str] = []
+        fills: list[dict[str, Any]] = []
+        submit_index: int | None = None
+        page_url = url
+        page_title = job_id
+        screenshot_path: Path | None = None
+        try:
+            await browser.start()
+            page = await browser.new_page()
+            await page.goto(url)
+            await asyncio.sleep(1.25)
+            snapshot = _decoded_json(await page.evaluate(AUTOPILOT_SNAPSHOT_SCRIPT))
+            page_url = str(await page.get_url())
+            page_title = str(snapshot.get("title") or job_id)
+            fields = list(snapshot.get("fields") or [])
+            buttons = list(snapshot.get("buttons") or [])
+            submit_button = _choose_submit_button(buttons)
+            submit_index = int(submit_button["index"]) if submit_button else None
+            if submit_button and int(submit_button.get("form_index", -1)) >= 0:
+                fields = [
+                    field
+                    for field in fields
+                    if int(field.get("form_index", -1)) == int(submit_button["form_index"])
+                ]
+            fills, errors = _plan_form_fills(fields, answers, autopilot_config)
+            if not fields:
+                errors.append("No application form fields were found on this page.")
+            elif not fills:
+                errors.append("No form fields could be safely filled from known answers.")
+            if submit_index is None:
+                errors.append("No safe submit/apply button was found.")
+            if errors:
+                screenshot_path = self._save_read_only_screenshot(await page.screenshot(), "autopilot-blocked")
+                self.recorder.record(
+                    ActionRecord(
+                        run_id=self.recorder.run_id,
+                        workflow="autopilot_submit",
+                        page_url=page_url,
+                        page_title=page_title,
+                        visible_action_candidates=[],
+                        selected_action="blocked_before_submit",
+                        risk_classification=RiskClass.JOB_SUBMIT,
+                        input_values={"job_id": job_id, "planned_fills": _audit_fills(fills)},
+                        preconditions=["private autopilot standing authorization exists"],
+                        postconditions=["no submit button was clicked"],
+                        screenshot_path=str(screenshot_path),
+                        result="blocked",
+                        errors=errors,
+                        approved=True,
+                    )
+                )
+                return {"submitted": False, "blocked": True, "errors": errors, "fills": _audit_fills(fills)}
+
+            file_fills = [fill for fill in fills if fill.get("kind") == "file"]
+            text_fills = [fill for fill in fills if fill.get("kind") != "file"]
+            await _upload_file_fields(page, file_fills)
+            await page.evaluate(_fill_form_script(text_fills))
+            await asyncio.sleep(0.5)
+            await page.evaluate(_click_submit_script(submit_index))
+            await asyncio.sleep(2.0)
+            page_url = str(await page.get_url())
+            screenshot_path = self._save_read_only_screenshot(await page.screenshot(), "autopilot-submit")
+            self.recorder.record(
+                ActionRecord(
+                    run_id=self.recorder.run_id,
+                    workflow="autopilot_submit",
+                    page_url=page_url,
+                    page_title=page_title,
+                    visible_action_candidates=[],
+                    selected_action="click_final_submit_with_private_autopilot_authorization",
+                    risk_classification=RiskClass.JOB_SUBMIT,
+                    input_values={"job_id": job_id, "planned_fills": _audit_fills(fills)},
+                    preconditions=[
+                        "private autopilot standing authorization exists",
+                        "all required fields were mapped to known answers",
+                        "submit host was privately allowlisted",
+                    ],
+                    postconditions=["submit/apply button clicked", "audit screenshot saved"],
+                    screenshot_path=str(screenshot_path),
+                    result="submit_clicked",
+                    approved=True,
+                )
+            )
+            return {"submitted": True, "blocked": False, "errors": [], "fills": _audit_fills(fills)}
+        finally:
+            await browser.stop()
+
     async def extract_job_links(self, search_url: str) -> list[dict[str, str]]:
         observation = await self.observe_page(search_url)
         candidates: list[dict[str, str]] = []
@@ -287,3 +391,226 @@ def _decoded_json(value: Any) -> Any:
         return json.loads(value)
     except json.JSONDecodeError:
         return value
+
+
+AUTOPILOT_SNAPSHOT_SCRIPT = """() => {
+    const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const textFor = (el) => {
+        const parts = [];
+        if (el.id) {
+            document.querySelectorAll(`label[for="${CSS.escape(el.id)}"]`).forEach(label => parts.push(label.innerText || ''));
+        }
+        const label = el.closest('label');
+        if (label) parts.push(label.innerText || '');
+        parts.push(el.getAttribute('aria-label') || '');
+        parts.push(el.getAttribute('placeholder') || '');
+        parts.push(el.name || '');
+        parts.push(el.id || '');
+        return parts.join(' ').replace(/\\s+/g, ' ').trim();
+    };
+    const forms = Array.from(document.querySelectorAll('form'));
+    const formIndexFor = (el) => forms.indexOf(el.closest('form'));
+    const fieldElements = Array.from(document.querySelectorAll('input, textarea, select'))
+        .filter(el => visible(el) && !el.disabled)
+        .filter(el => !['hidden', 'submit', 'button', 'reset', 'image'].includes((el.type || '').toLowerCase()));
+    fieldElements.forEach((el, index) => el.setAttribute('data-autopilot-field-index', String(index)));
+    const fields = fieldElements.map((el, index) => ({
+            index,
+            tag: el.tagName.toLowerCase(),
+            type: (el.type || '').toLowerCase(),
+            name: el.name || '',
+            id: el.id || '',
+            label: textFor(el).slice(0, 240),
+            required: Boolean(el.required || el.getAttribute('aria-required') === 'true'),
+            form_index: formIndexFor(el)
+        }));
+    const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"]'))
+        .filter(el => visible(el) && !el.disabled)
+        .map((el, index) => ({
+            index,
+            form_index: formIndexFor(el),
+            text: ((el.innerText || el.value || el.getAttribute('aria-label') || '') + '').replace(/\\s+/g, ' ').trim().slice(0, 160)
+        }));
+    return {title: document.title || '', url: location.href, fields, buttons};
+}"""
+
+
+def _field_text(field: dict[str, Any]) -> str:
+    return " ".join(str(field.get(key, "")) for key in ("label", "name", "id", "type")).casefold()
+
+
+def _split_name(name: Any) -> tuple[str | None, str | None]:
+    if not is_known(name):
+        return None, None
+    parts = str(name).strip().split()
+    if not parts:
+        return None, None
+    if len(parts) == 1:
+        return parts[0], None
+    return parts[0], " ".join(parts[1:])
+
+
+def _link_for(answers: dict[str, Any], needle: str) -> str | None:
+    for link in answers.get("links") or []:
+        value = str(link)
+        if needle in value.casefold():
+            return value
+    return None
+
+
+def _answer_for_field(field: dict[str, Any], answers: dict[str, Any]) -> str | None:
+    text = _field_text(field)
+    first_name, last_name = _split_name(answers.get("name"))
+    if "first" in text and first_name:
+        return first_name
+    if any(word in text for word in ("last", "surname", "family")) and last_name:
+        return last_name
+    if "name" in text and is_known(answers.get("name")):
+        return str(answers["name"])
+    if "email" in text and is_known(answers.get("email")):
+        return str(answers["email"])
+    if any(word in text for word in ("phone", "mobile", "tel")) and is_known(answers.get("phone")):
+        return str(answers["phone"])
+    if any(word in text for word in ("location", "city", "address", "country")) and is_known(answers.get("location")):
+        return str(answers["location"])
+    if "linkedin" in text:
+        return _link_for(answers, "linkedin")
+    if "github" in text:
+        return _link_for(answers, "github")
+    if any(word in text for word in ("portfolio", "website", "url", "link")):
+        links = answers.get("links") or []
+        return str(links[0]) if links else None
+    if any(word in text for word in ("authorization", "authorisation", "visa", "sponsor", "work permit")):
+        return str(answers["work_authorization"]) if is_known(answers.get("work_authorization")) else None
+    if any(word in text for word in ("availability", "start date", "notice period")):
+        return str(answers["availability"]) if is_known(answers.get("availability")) else None
+    if any(word in text for word in ("salary", "compensation", "pay expectation")):
+        return str(answers["salary_expectation"]) if is_known(answers.get("salary_expectation")) else None
+    return None
+
+
+def _plan_form_fills(
+    fields: list[dict[str, Any]],
+    answers: dict[str, Any],
+    config: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    fills: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for field in fields:
+        field_type = str(field.get("type", "")).casefold()
+        tag = str(field.get("tag", "")).casefold()
+        label = str(field.get("label") or field.get("name") or field.get("id") or f"field {field.get('index')}")
+        required = bool(field.get("required"))
+        if field_type == "file":
+            resume_path = Path(str(config.get("resume_path") or "")).expanduser()
+            if config.get("block_file_uploads", True) or not resume_path.exists():
+                errors.append(f"File upload field blocked: {label}")
+            else:
+                fills.append(
+                    {
+                        "index": int(field["index"]),
+                        "label": label,
+                        "value": str(resume_path.resolve()),
+                        "kind": "file",
+                    }
+                )
+            continue
+        if field_type in {"checkbox", "radio"} and required and config.get("block_required_checkboxes", True):
+            errors.append(f"Required checkbox/radio blocked: {label}")
+            continue
+        if tag == "select" and required:
+            errors.append(f"Required select field needs manual review: {label}")
+            continue
+        answer = _answer_for_field(field, answers)
+        if answer:
+            fills.append({"index": int(field["index"]), "label": label, "value": answer, "kind": "text"})
+        elif required and config.get("block_unknown_required_fields", True):
+            errors.append(f"Required field has no known answer: {label}")
+    return fills, errors
+
+
+def _choose_submit_button(buttons: list[dict[str, Any]]) -> dict[str, Any] | None:
+    blocked = ("delete", "withdraw", "remove", "pay", "purchase", "checkout")
+    preferred = ("submit application", "submit", "apply now", "apply")
+    for button in buttons:
+        text = str(button.get("text", "")).casefold()
+        if not text or any(word in text for word in blocked):
+            continue
+        if any(word in text for word in preferred):
+            return button
+    return None
+
+
+def _fill_form_script(fills: list[dict[str, Any]]) -> str:
+    payload = json.dumps(fills)
+    return f"""() => {{
+        const fills = {payload};
+        const visible = (el) => {{
+            const r = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        }};
+        const fields = Array.from(document.querySelectorAll('input, textarea, select'))
+            .filter(el => visible(el) && !el.disabled)
+            .filter(el => !['hidden', 'submit', 'button', 'reset', 'image'].includes((el.type || '').toLowerCase()));
+        for (const fill of fills) {{
+            const el = fields[fill.index];
+            if (!el) continue;
+            el.focus();
+            el.value = fill.value;
+            el.dispatchEvent(new Event('input', {{bubbles: true}}));
+            el.dispatchEvent(new Event('change', {{bubbles: true}}));
+        }}
+        return fills.length;
+    }}"""
+
+
+async def _upload_file_fields(page: Any, fills: list[dict[str, Any]]) -> None:
+    if not fills:
+        return
+    session_id = await page.session_id
+    document = await page._client.send.DOM.getDocument({"depth": -1, "pierce": True}, session_id=session_id)
+    root_id = document["root"]["nodeId"]
+    for fill in fills:
+        selector = f'[data-autopilot-field-index="{int(fill["index"])}"]'
+        node = await page._client.send.DOM.querySelector(
+            {"nodeId": root_id, "selector": selector},
+            session_id=session_id,
+        )
+        node_id = node.get("nodeId")
+        if not node_id:
+            raise BrowserSafetyError(f"Could not find file input for upload: {fill.get('label', '')}")
+        await page._client.send.DOM.setFileInputFiles(
+            {"nodeId": node_id, "files": [str(fill["value"])]},
+            session_id=session_id,
+        )
+
+
+def _audit_fills(fills: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    audited: list[dict[str, Any]] = []
+    for fill in fills:
+        item = fill.copy()
+        if item.get("kind") == "file":
+            item["value"] = "[LOCAL_FILE]"
+        audited.append(item)
+    return audited
+
+
+def _click_submit_script(index: int) -> str:
+    return f"""() => {{
+        const visible = (el) => {{
+            const r = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        }};
+        const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"]'))
+            .filter(el => visible(el) && !el.disabled);
+        const button = buttons[{index}];
+        if (!button) throw new Error('submit button disappeared before click');
+        button.click();
+        return true;
+    }}"""

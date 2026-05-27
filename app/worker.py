@@ -9,7 +9,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .autopilot import decide_autopilot_for_job, load_autopilot
 from .application_agent import ApplicationRepository, ApplicationWorkflow
+from .browser_engine import BrowserEngine
 from .config import Settings
 from .cv_store import load_profile
 from .email_notifier import generate_daily_update
@@ -97,10 +99,15 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
     repository.save_jobs(ranked)
 
     drafted: list[str] = []
+    autopilot_submitted: list[str] = []
+    autopilot_blocked: list[dict[str, Any]] = []
     workflow = ApplicationWorkflow(settings, recorder)
     profile = load_profile(settings)
     use_llm = watchlist.get("with_llm_advisory", True) if with_llm is None else with_llm
     llm = LocalLLMClient(settings) if use_llm else None
+    autopilot_config = load_autopilot(settings)
+    max_autopilot_submits = int(autopilot_config.get("max_submissions_per_run", 1))
+    browser_engine = BrowserEngine(settings, recorder)
     min_score = int(watchlist.get("min_auto_draft_score", 45))
     draftable_jobs = [
         job for job in ranked if int(job.get("match_score", 0)) >= min_score
@@ -113,8 +120,37 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
                 advisory = llm.grounded_job_advisory(profile, job)
             except LocalLLMError as exc:
                 errors.append(f"LLM advisory failed for {job_id}: {exc}")
-        workflow.draft(job_id, advisory)
+        draft_path = workflow.draft(job_id, advisory)
         drafted.append(job_id)
+        if repository.has_submission(job_id):
+            autopilot_blocked.append({"job_id": job_id, "reasons": ["job already has a local submission record"]})
+            continue
+        if len(autopilot_submitted) >= max_autopilot_submits:
+            continue
+        try:
+            draft_payload = json.loads(draft_path.read_text(encoding="utf-8"))
+            decision = decide_autopilot_for_job(
+                draft_payload["job"],
+                draft_payload["answers"],
+                autopilot_config,
+            )
+            if not decision.allowed:
+                autopilot_blocked.append({"job_id": job_id, "reasons": decision.reasons})
+                continue
+            result = await browser_engine.auto_submit_application(
+                str(job["url"]),
+                job_id,
+                draft_payload["answers"],
+                autopilot_config,
+            )
+            if result.get("submitted"):
+                workflow.record_autopilot_submission(job_id, result)
+                autopilot_submitted.append(job_id)
+            else:
+                autopilot_blocked.append({"job_id": job_id, "reasons": result.get("errors", [])})
+        except Exception as exc:
+            errors.append(f"Autopilot failed for {job_id}: {exc}")
+            LOGGER.exception("autopilot failed for %s", job_id)
 
     report = generate_daily_update(settings)
     status = {
@@ -122,6 +158,8 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         "jobs_known": len(ranked),
         "jobs_found_this_run": len(found),
         "drafted_job_ids": drafted,
+        "autopilot_submitted_job_ids": autopilot_submitted,
+        "autopilot_blocked": autopilot_blocked,
         "daily_update": str(report),
         "audit_log": str(recorder.path),
         "errors": errors,

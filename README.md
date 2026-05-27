@@ -1,8 +1,8 @@
 # Local-First Job Application Browser Agent
 
 A cautious Python MVP for finding public job postings, grounding drafts in a supplied
-CV, retaining a local browser login session, and requiring human ownership of final
-submission or email sending.
+CV, retaining a local browser login session, and optionally auto-submitting simple
+applications after private standing authorization.
 
 Browser Use is the browser execution engine. The added WebABI-style layer records
 actions and risk classifications in private JSONL audit logs.
@@ -19,13 +19,18 @@ actions and risk classifications in private JSONL audit logs.
 - `--dry-run` saves a draft only and does not click submit.
 - `--confirm` requires `SUBMIT <job_id>`, opens the application in your local saved
   browser session, and leaves the actual Submit click to you.
+- `--auto-submit` is disabled by default and requires a private ignored
+  `data/profiles/autopilot.json` opt-in file with standing authorization.
+- Autopilot submits only simple forms where required fields are answerable from
+  CV/profile/preferences. It blocks unknown required fields, required checkboxes,
+  file uploads, payment/destructive actions, and non-allowlisted hosts.
 - Email delivery is off unless SMTP environment variables are explicitly configured,
   and still requires the typed phrase `SEND UPDATE`.
 - Destructive and payment actions are blocked by policy.
 
-The conservative manual final click is intentional: an unrestricted browser-agent
-submit run cannot yet be intercepted action-by-action with enough confidence for
-applications containing unknown personal facts.
+The autopilot guardrails are intentional: an unrestricted browser-agent submit run
+cannot be intercepted action-by-action with enough confidence for applications
+containing unknown personal facts.
 
 ## Layout
 
@@ -122,8 +127,9 @@ The background worker runs locally and safely:
   engines may block automation.
 - Ranks against CV and preferences.
 - Drafts only high-scoring local applications at or above `min_auto_draft_score`.
+- If private autopilot is enabled, attempts at most `max_submissions_per_run`
+  guarded submissions per cycle.
 - Generates `data/applications/daily_update.md`.
-- Never submits applications.
 - Never sends email.
 
 Initialize the private watchlist:
@@ -161,6 +167,37 @@ data/profiles/watchlist.json
 
 The default watchlist keeps `queries_enabled` off because Google/DuckDuckGo served
 anti-automation interstitials from this host during testing.
+
+## Private Autopilot
+
+Autopilot is local-only and off by default. Initialize the private template:
+
+```bash
+.venv/bin/python -m app.main init-autopilot
+chmod 600 data/profiles/autopilot.json
+```
+
+Edit `data/profiles/autopilot.json` locally. To allow guarded auto-submit attempts,
+set:
+
+```json
+{
+  "enabled": true,
+  "submit_without_per_job_confirmation": true,
+  "standing_authorization": "I AUTHORIZE LOCAL AUTOPILOT SUBMISSIONS",
+  "min_match_score": 80,
+  "max_submissions_per_run": 1,
+  "resume_path": "/absolute/path/to/resume.pdf",
+  "block_file_uploads": false,
+  "allowed_submit_hosts": ["jobs.example.com"]
+}
+```
+
+That file is ignored by git. Add only hosts you are comfortable allowing the agent
+to submit on. Autopilot will still block a posting if the page has required custom
+questions, required checkboxes, missing or disabled resume upload configuration,
+required select boxes, missing candidate identity, unknown salary/work authorization
+fields, or no real application form on the page.
 
 ## Manual Login Session
 
@@ -215,7 +252,19 @@ SUBMIT <job_id>
 ```
 
 It then opens the approved posting in the persistent visible browser; you review and
-press Submit manually. The application is never silently submitted.
+press Submit manually.
+
+For a privately authorized guarded attempt:
+
+```bash
+.venv/bin/python -m app.main apply --job-id <id> --auto-submit
+```
+
+The command writes a draft first, checks the private autopilot policy, opens the
+posting with the persistent browser profile, fills only known fields, and clicks a
+safe submit/apply button only if no blockers are found. Every attempt is written to
+the audit log. Successful submit clicks also create a private local ledger entry in
+`data/applications/submissions/` so the worker does not submit the same job again.
 
 ## Daily Update And Optional Email
 
@@ -246,6 +295,6 @@ latest log with:
 
 ## Current Scope
 
-This MVP omits a web dashboard and automatic final form submission in favor of the
-safety gates above. It provides a working local CLI foundation for adding audited,
-site-specific form adapters later.
+This MVP omits a web dashboard. Autopilot uses conservative generic form handling;
+site-specific adapters can be added later for higher completion rates without
+weakening the audit and fact-source gates.

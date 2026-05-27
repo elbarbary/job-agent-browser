@@ -47,6 +47,15 @@ class ApplicationRepository:
                 return job
         raise ApplicationError(f"Unknown job id: {job_id}")
 
+    def submission_path(self, job_id: str) -> Path:
+        return self.settings.applications_dir / "submissions" / f"{job_id}.json"
+
+    def has_submission(self, job_id: str) -> bool:
+        return self.submission_path(job_id).exists()
+
+    def record_submission(self, job_id: str, payload: dict[str, Any]) -> Path:
+        return _write_private_json(self.submission_path(job_id), payload)
+
 
 class ApplicationWorkflow:
     def __init__(self, settings: Settings, recorder: AuditRecorder) -> None:
@@ -123,6 +132,18 @@ class ApplicationWorkflow:
             )
         )
         return path
+
+    def record_autopilot_submission(self, job_id: str, result: dict[str, Any]) -> Path:
+        job_data = self.repository.find_job(job_id)
+        payload = {
+            "job_id": job_id,
+            "job_url": job_data.get("url"),
+            "submitted_at": datetime.now(UTC).isoformat(),
+            "execution": "autopilot_submit_clicked",
+            "result": result,
+            "note": "Autopilot clicked the final submit/apply button after private standing authorization.",
+        }
+        return self.repository.record_submission(job_id, payload)
 
 
 def _ranked_job_fields(job: dict[str, Any]) -> dict[str, Any]:

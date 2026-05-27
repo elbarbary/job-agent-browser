@@ -103,6 +103,7 @@ class Settings:
             self.applications_dir,
             self.applications_dir / "drafts",
             self.applications_dir / "approvals",
+            self.applications_dir / "submissions",
         )
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)

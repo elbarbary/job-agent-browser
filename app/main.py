@@ -8,6 +8,7 @@ import json
 import sys
 from pathlib import Path
 
+from .autopilot import decide_autopilot_for_job, load_autopilot, write_default_autopilot
 from .application_agent import ApplicationRepository, ApplicationWorkflow
 from .browser_engine import BrowserEngine, BrowserSafetyError
 from .config import ConfigurationError, Settings
@@ -33,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("smoke-test", help="Open example.com safely and report visible interactive items")
     sub.add_parser("init-preferences", help="Write the private user-confirmed job preference profile")
     sub.add_parser("init-watchlist", help="Write the private background worker watchlist")
+    sub.add_parser("init-autopilot", help="Write the private opt-in autopilot submission template")
     worker_once = sub.add_parser("worker-once", help="Run one safe background worker cycle")
     worker_once.add_argument("--no-llm", action="store_true", help="Disable LLM advisory for this run")
     worker = sub.add_parser("worker", help="Run the safe background worker forever")
@@ -53,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode = apply.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--confirm", action="store_true")
+    mode.add_argument("--auto-submit", action="store_true")
     apply.add_argument(
         "--with-llm",
         action="store_true",
@@ -115,6 +118,28 @@ async def _run_async(args: argparse.Namespace, settings: Settings) -> int:
         print(f"Approval saved: {approval_path}")
         await BrowserEngine(settings, recorder).manual_submission_review(str(job["url"]), args.job_id)
         return 0
+    if args.command == "apply" and args.auto_submit:
+        workflow = ApplicationWorkflow(settings, recorder)
+        if workflow.repository.has_submission(args.job_id):
+            print(json.dumps({"autopilot_allowed": False, "reasons": ["job already has a local submission record"]}, indent=2))
+            return 2
+        draft_path = workflow.draft(args.job_id)
+        draft = json.loads(draft_path.read_text(encoding="utf-8"))
+        config = load_autopilot(settings)
+        decision = decide_autopilot_for_job(draft["job"], draft["answers"], config)
+        if not decision.allowed:
+            print(json.dumps({"autopilot_allowed": False, "reasons": decision.reasons}, indent=2))
+            return 2
+        result = await BrowserEngine(settings, recorder).auto_submit_application(
+            str(draft["job"]["url"]),
+            args.job_id,
+            draft["answers"],
+            config,
+        )
+        if result.get("submitted"):
+            workflow.record_autopilot_submission(args.job_id, result)
+        print(json.dumps(result, indent=2, ensure_ascii=True))
+        return 0 if result.get("submitted") else 2
     if args.command == "worker-once":
         status = await run_once(settings, with_llm=not args.no_llm)
         print(json.dumps(status, indent=2, ensure_ascii=True))
@@ -127,9 +152,9 @@ async def _run_async(args: argparse.Namespace, settings: Settings) -> int:
 
 def run(args: argparse.Namespace, settings: Settings) -> int:
     if args.command in {"login-session", "smoke-test", "search-jobs", "worker-once", "worker"} or (
-        args.command == "apply" and args.confirm
+        args.command == "apply" and (args.confirm or args.auto_submit)
     ):
-        if args.command == "apply" and args.confirm and args.with_llm:
+        if args.command == "apply" and (args.confirm or args.auto_submit) and args.with_llm:
             raise PolicyViolation("--with-llm is available only for a dry-run draft.")
         return asyncio.run(_run_async(args, settings))
     if args.command == "ingest-cv":
@@ -165,6 +190,10 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
     if args.command == "init-watchlist":
         path = write_default_watchlist(settings)
         print(f"Worker watchlist saved: {path}")
+        return 0
+    if args.command == "init-autopilot":
+        path = write_default_autopilot(settings)
+        print(f"Autopilot template saved: {path}")
         return 0
     if args.command == "review-jobs":
         _review_jobs(settings)
