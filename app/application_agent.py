@@ -80,12 +80,14 @@ class ApplicationWorkflow:
         answers = job.suggested_application_answers
         facts = preferences.get("candidate_user_confirmed_facts") or {}
         _apply_user_confirmed_facts(answers, facts)
+        remaining_user_answers = _remaining_user_answers(job.risks_uncertainties, answers)
+        job.risks_uncertainties = remaining_user_answers
         payload = {
             "job": job.to_dict(),
             "status": "draft_only_no_submission",
             "generated_at": datetime.now(UTC).isoformat(),
             "answers": answers,
-            "required_user_answers": job.risks_uncertainties,
+            "required_user_answers": remaining_user_answers,
             "safety_note": "No site form was submitted. Unknown answers require the user.",
             "llm_advisory_notes": llm_advisory,
             "llm_advisory_policy": (
@@ -208,6 +210,22 @@ def _apply_user_confirmed_facts(answers: dict[str, Any], facts: dict[str, Any]) 
     if availability:
         answers["availability"] = availability
     answers["salary_expectation"] = _known_fact(facts.get("salary_target")) or "needs_user_answer"
+
+
+def _remaining_user_answers(uncertainties: list[str], answers: dict[str, Any]) -> list[str]:
+    remaining: list[str] = []
+    for uncertainty in uncertainties:
+        text = uncertainty.casefold()
+        if "work authorization" in text and _known_fact(answers.get("work_authorization")):
+            continue
+        if ("availability" in text or "start date" in text) and _known_fact(answers.get("availability")):
+            continue
+        if "salary" in text and _known_fact(answers.get("salary_expectation")):
+            continue
+        if "relocation" in text and _known_fact(answers.get("relocation")):
+            continue
+        remaining.append(uncertainty)
+    return remaining
 
 
 def _legacy_sponsorship_home_country(facts: dict[str, Any]) -> str | None:

@@ -26,7 +26,11 @@ class ApplicationWorkflowTests(unittest.TestCase):
                 "education": [],
                 "certifications": [],
                 "links": [],
-                "constraints_questions_needing_user_confirmation": [],
+                "constraints_questions_needing_user_confirmation": [
+                    "needs_user_answer: work authorization is not stated in the CV.",
+                    "needs_user_answer: availability/start date is not stated in the CV.",
+                    "needs_user_answer: desired salary or salary history is not stated in the CV.",
+                ],
             }
             profile_path = settings.profile_dir / "candidate_profile.json"
             profile_path.write_text(json.dumps(profile), encoding="utf-8")
@@ -67,6 +71,10 @@ class ApplicationWorkflowTests(unittest.TestCase):
                 "User-confirmed work authorization answer.",
             )
             self.assertEqual(draft["answers"]["availability"], "User-confirmed availability.")
+            self.assertEqual(
+                draft["required_user_answers"],
+                ["needs_user_answer: desired salary or salary history is not stated in the CV."],
+            )
             approval = json.loads(
                 workflow.approve_for_manual_submission("abc123").read_text(encoding="utf-8")
             )

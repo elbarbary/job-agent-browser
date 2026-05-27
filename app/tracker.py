@@ -43,6 +43,7 @@ def tracker_status(settings: Settings) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     for job in jobs:
         job_id = str(job.get("id", ""))
+        draft = drafts.get(job_id)
         if job_id in submissions:
             state = "submitted"
         elif job_id in attempts:
@@ -60,8 +61,12 @@ def tracker_status(settings: Settings) -> dict[str, Any]:
                 "company": job.get("company", ""),
                 "location": job.get("location", ""),
                 "url": job.get("url", ""),
-                "risks_uncertainties": job.get("risks_uncertainties") or [],
-                "draft": drafts.get(job_id),
+                "risks_uncertainties": (
+                    draft.get("required_user_answers")
+                    if isinstance(draft, dict) and draft.get("required_user_answers") is not None
+                    else job.get("risks_uncertainties") or []
+                ),
+                "draft": draft,
                 "submission": submissions.get(job_id),
                 "submission_attempt": attempts.get(job_id),
                 "approval": approvals.get(job_id),

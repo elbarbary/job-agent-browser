@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import smtplib
 from datetime import UTC, datetime
 from email.message import EmailMessage
@@ -42,8 +43,13 @@ def generate_daily_update(settings: Settings) -> Path:
         "",
     ]
     questions: set[str] = set()
+    draft_questions = _draft_questions(drafts)
     for job in jobs:
-        questions.update(job.get("risks_uncertainties") or [])
+        job_id = str(job.get("id", ""))
+        if job_id in draft_questions:
+            questions.update(draft_questions[job_id])
+        else:
+            questions.update(job.get("risks_uncertainties") or [])
     lines.extend(f"- {question}" for question in sorted(questions))
     if not questions:
         lines.append("- None currently recorded.")
@@ -52,6 +58,18 @@ def generate_daily_update(settings: Settings) -> Path:
     path.write_text("\n".join(lines), encoding="utf-8")
     path.chmod(0o600)
     return path
+
+
+def _draft_questions(drafts: list[Path]) -> dict[str, list[str]]:
+    questions: dict[str, list[str]] = {}
+    for draft_path in drafts:
+        try:
+            draft = json.loads(draft_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        job_id = str((draft.get("job") or {}).get("id") or draft_path.stem)
+        questions[job_id] = list(draft.get("required_user_answers") or [])
+    return questions
 
 
 def send_update(settings: Settings, report_path: Path, recorder: AuditRecorder) -> None:
