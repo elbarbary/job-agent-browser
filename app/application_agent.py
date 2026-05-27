@@ -56,6 +56,9 @@ class ApplicationRepository:
     def has_submission(self, job_id: str) -> bool:
         return self.submission_path(job_id).exists()
 
+    def has_submission_attempt(self, job_id: str) -> bool:
+        return self.submission_attempt_path(job_id).exists()
+
     def record_submission(self, job_id: str, payload: dict[str, Any]) -> Path:
         return _write_private_json(self.submission_path(job_id), payload)
 

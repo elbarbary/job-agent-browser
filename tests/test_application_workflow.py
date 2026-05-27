@@ -76,6 +76,7 @@ class ApplicationWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(submission["execution"], "autopilot_submit_clicked")
             self.assertTrue(workflow.repository.has_submission("abc123"))
+            self.assertFalse(workflow.repository.has_submission_attempt("abc123"))
             audit = recorder.path.read_text(encoding="utf-8")
             self.assertIn("draft_saved_no_submission", audit)
             self.assertIn("approved_manual_submission_required", audit)
@@ -130,6 +131,30 @@ class ApplicationWorkflowTests(unittest.TestCase):
                 draft["answers"]["work_authorization"],
                 "Exampleland citizen; requires employer visa/work authorization sponsorship for roles outside Exampleland.",
             )
+
+    def test_unverified_submission_attempt_is_tracked_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings.load(Path(tmp))
+            settings.ensure_directories()
+            ApplicationRepository(settings).save_jobs(
+                [
+                    {
+                        "id": "abc123",
+                        "title": "Python Engineer",
+                        "company": "Example",
+                        "location": "Remote",
+                        "url": "https://jobs.lever.co/example/abc123",
+                        "description": "Required: Python",
+                        "source": "test",
+                    }
+                ]
+            )
+            workflow = ApplicationWorkflow(settings, AuditRecorder(settings.log_dir / "runs"))
+            self.assertFalse(workflow.repository.has_submission_attempt("abc123"))
+            attempt = workflow.record_autopilot_attempt("abc123", {"clicked": True, "submitted": False})
+            self.assertTrue(attempt.exists())
+            self.assertTrue(workflow.repository.has_submission_attempt("abc123"))
+            self.assertFalse(workflow.repository.has_submission("abc123"))
 
 
 if __name__ == "__main__":

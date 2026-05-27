@@ -127,6 +127,9 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         if repository.has_submission(job_id):
             autopilot_blocked.append({"job_id": job_id, "reasons": ["job already has a local submission record"]})
             continue
+        if repository.has_submission_attempt(job_id):
+            autopilot_blocked.append({"job_id": job_id, "reasons": ["job already has an unverified submit-click record"]})
+            continue
         if len(autopilot_submitted) >= max_autopilot_submits:
             continue
         try:

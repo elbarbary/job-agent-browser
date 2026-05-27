@@ -304,6 +304,8 @@ An autopilot submission record means the agent clicked the final submit/apply bu
 and then detected a post-submit confirmation message such as "application received"
 or "thank you for applying." If it clicks a button but cannot detect confirmation,
 the tracker records an `unverified_submit_click` instead of a submission.
+Autopilot will not retry jobs that already have an unverified submit-click record;
+review those manually before clearing or archiving the attempt.
 
 No email confirmation is guaranteed. Some sites send no email, some delay it, some
 route it to the email field used in the CV/profile, and some require backend

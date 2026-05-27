@@ -148,6 +148,9 @@ async def _run_async(args: argparse.Namespace, settings: Settings) -> int:
         if workflow.repository.has_submission(args.job_id):
             print(json.dumps({"autopilot_allowed": False, "reasons": ["job already has a local submission record"]}, indent=2))
             return 2
+        if workflow.repository.has_submission_attempt(args.job_id):
+            print(json.dumps({"autopilot_allowed": False, "reasons": ["job already has an unverified submit-click record"]}, indent=2))
+            return 2
         draft_path = workflow.draft(args.job_id)
         draft = json.loads(draft_path.read_text(encoding="utf-8"))
         config = load_autopilot(settings)
