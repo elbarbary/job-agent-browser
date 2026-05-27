@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
 
@@ -150,6 +150,53 @@ class BrowserEngine:
                     approved=True,
                 )
             )
+        finally:
+            await browser.stop()
+
+    async def gmail_check(self, query: str) -> Path:
+        self.settings.ensure_directories()
+        assert_action_allowed(RiskClass.READ_ONLY)
+        browser = self._new_browser(headed=True, persistent=True)
+        output_dir = self.settings.applications_dir / "gmail_checks"
+        output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        output_path = output_dir / f"{self.recorder.run_id}.txt"
+        gmail_url = f"https://mail.google.com/mail/u/0/#search/{quote(query, safe='')}"
+        try:
+            await browser.start()
+            page = await browser.new_page()
+            await page.goto(gmail_url)
+            print("Gmail is open in the persistent browser profile.")
+            print("This command is read-only: it searches and saves visible page text, but never sends email.")
+            input("After Gmail finishes loading the search results, press ENTER here to save the visible text: ")
+            page_url = str(await page.get_url())
+            page_title = str(_decoded_json(await page.evaluate("() => document.title || 'Gmail'")))
+            visible_text = str(
+                _decoded_json(
+                    await page.evaluate(
+                        "() => (document.body && document.body.innerText || '').slice(0, 20000)"
+                    )
+                )
+            )
+            output_path.write_text(visible_text + "\n", encoding="utf-8")
+            output_path.chmod(0o600)
+            screenshot_path = self._save_read_only_screenshot(await page.screenshot(), "gmail-check")
+            self.recorder.record(
+                ActionRecord(
+                    run_id=self.recorder.run_id,
+                    workflow="gmail_check",
+                    page_url=page_url,
+                    page_title=page_title,
+                    visible_action_candidates=[],
+                    selected_action="read_gmail_search_results",
+                    risk_classification=RiskClass.READ_ONLY,
+                    input_values={"query": query},
+                    preconditions=["manual Google login exists in the local browser profile"],
+                    postconditions=["visible Gmail search text saved locally", "no email was sent"],
+                    screenshot_path=str(screenshot_path),
+                    result="success",
+                )
+            )
+            return output_path
         finally:
             await browser.stop()
 

@@ -58,6 +58,34 @@ class AutopilotTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertGreaterEqual(len(decision.reasons), 3)
 
+    def test_decision_requires_reviewed_profile_by_default(self) -> None:
+        config = {
+            "enabled": True,
+            "submit_without_per_job_confirmation": True,
+            "standing_authorization": AUTHORIZATION_PHRASE,
+            "allowed_submit_hosts": ["jobs.example.test"],
+            "min_match_score": 80,
+        }
+        job = {"url": "https://jobs.example.test/role", "match_score": 90}
+        unreviewed = decide_autopilot_for_job(
+            job,
+            {"name": "Ada Example", "email": "ada@example.test"},
+            config,
+        )
+        self.assertFalse(unreviewed.allowed)
+        self.assertIn("candidate profile facts have not been user-reviewed", unreviewed.reasons)
+
+        reviewed = decide_autopilot_for_job(
+            job,
+            {
+                "name": "Ada Example",
+                "email": "ada@example.test",
+                "_profile_reviewed": True,
+            },
+            config,
+        )
+        self.assertTrue(reviewed.allowed)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -105,6 +105,7 @@ class Settings:
             self.applications_dir / "approvals",
             self.applications_dir / "submissions",
             self.applications_dir / "submission_attempts",
+            self.applications_dir / "gmail_checks",
         )
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)

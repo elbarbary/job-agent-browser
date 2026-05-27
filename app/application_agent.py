@@ -176,6 +176,14 @@ def _known_fact(value: Any) -> str | None:
 
 
 def _apply_user_confirmed_facts(answers: dict[str, Any], facts: dict[str, Any]) -> None:
+    contact_email = _known_fact(facts.get("contact_email")) or _known_fact(facts.get("email"))
+    if contact_email:
+        answers["email"] = contact_email
+        answers["_email_source"] = "user_confirmed_preferences"
+    else:
+        answers["_email_source"] = "candidate_profile"
+    answers["_profile_reviewed"] = facts.get("profile_reviewed") is True
+
     work_authorization = _known_fact(facts.get("work_authorization_summary"))
     if work_authorization:
         answers["work_authorization"] = work_authorization

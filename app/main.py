@@ -33,6 +33,12 @@ def build_parser() -> argparse.ArgumentParser:
     ingest = sub.add_parser("ingest-cv", help="Extract a PDF or DOCX CV into a grounded profile")
     ingest.add_argument("path", type=Path)
     sub.add_parser("login-session", help="Open a persistent visible browser for manual login")
+    gmail = sub.add_parser("gmail-check", help="Open Gmail read-only and save visible search results")
+    gmail.add_argument(
+        "--query",
+        default="application OR applied OR interview OR thank you",
+        help="Gmail search query to open in the saved browser session",
+    )
     sub.add_parser("smoke-test", help="Open example.com safely and report visible interactive items")
     sub.add_parser("init-preferences", help="Write the private user-confirmed job preference profile")
     sub.add_parser("init-watchlist", help="Write the private background worker watchlist")
@@ -102,6 +108,11 @@ async def _run_async(args: argparse.Namespace, settings: Settings) -> int:
         await BrowserEngine(settings, recorder).manual_login_session()
         print(f"Session retained locally in {settings.browser_profile_dir}")
         return 0
+    if args.command == "gmail-check":
+        output = await BrowserEngine(settings, recorder).gmail_check(args.query)
+        print(f"Gmail visible search text saved: {output}")
+        print(f"Audit log: {recorder.path}")
+        return 0
     if args.command == "smoke-test":
         observed = await BrowserEngine(settings, recorder).smoke_test()
         print(f"Opened: {observed.title} ({observed.url})")
@@ -164,7 +175,7 @@ async def _run_async(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def run(args: argparse.Namespace, settings: Settings) -> int:
-    if args.command in {"login-session", "smoke-test", "search-jobs", "worker-once", "worker"} or (
+    if args.command in {"login-session", "gmail-check", "smoke-test", "search-jobs", "worker-once", "worker"} or (
         args.command == "apply" and (args.confirm or args.auto_submit)
     ):
         if args.command == "apply" and (args.confirm or args.auto_submit) and args.with_llm:

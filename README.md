@@ -115,6 +115,22 @@ The preference file is not committed. Fields left as `needs_user_answer` stay
 unknown and are not used as application facts. Do not commit a filled-in preference
 file; it may contain immigration, location, salary, or personal targeting data.
 
+Use `candidate_user_confirmed_facts` for corrections that should override imperfect
+CV extraction. For example, if the extracted email is wrong, set:
+
+```json
+{
+  "candidate_user_confirmed_facts": {
+    "profile_reviewed": true,
+    "contact_email": "your-confirmed-email@example.com"
+  }
+}
+```
+
+`profile_reviewed` is intentionally required for autopilot by default. This prevents
+standing auto-submit from using a misread CV name, email, phone number, or other
+identity fact before you have checked the private profile data.
+
 ## 24/7 Worker
 
 The background worker runs locally and safely:
@@ -188,6 +204,7 @@ set:
   "min_match_score": 80,
   "max_submissions_per_run": 1,
   "resume_path": "/absolute/path/to/resume.pdf",
+  "require_profile_review": true,
   "block_file_uploads": false,
   "allowed_submit_hosts": ["jobs.example.com"]
 }
@@ -197,7 +214,7 @@ That file is ignored by git. Add only hosts you are comfortable allowing the age
 to submit on. Autopilot will still block a posting if the page has required custom
 questions, required checkboxes, missing or disabled resume upload configuration,
 required select boxes, missing candidate identity, unknown salary/work authorization
-fields, or no real application form on the page.
+fields, an unreviewed candidate profile, or no real application form on the page.
 
 ## Manual Login Session
 
@@ -263,7 +280,7 @@ For a privately authorized guarded attempt:
 The command writes a draft first, checks the private autopilot policy, opens the
 posting with the persistent browser profile, fills only known fields, and clicks a
 safe submit/apply button only if no blockers are found. Every attempt is written to
-the audit log. Successful submit clicks also create a private local ledger entry in
+the audit log. Verified submissions also create a private local ledger entry in
 `data/applications/submissions/` so the worker does not submit the same job again.
 
 An autopilot submission record means the agent clicked the final submit/apply button
@@ -274,6 +291,29 @@ the tracker records an `unverified_submit_click` instead of a submission.
 No email confirmation is guaranteed. Some sites send no email, some delay it, some
 route it to the email field used in the CV/profile, and some require backend
 validation after the click.
+
+## Gmail Check
+
+Gmail access uses the same local persistent browser session as manual login. The app
+does not ask for or store your Gmail password, and this command does not send mail:
+
+```bash
+.venv/bin/python -m app.main gmail-check \
+  --query "from:(greenhouse.io OR lever.co OR workday) OR application OR interview"
+```
+
+The command opens Gmail visibly, lets you wait for search results to load, then saves
+the visible page text to `data/applications/gmail_checks/` and writes a read-only
+audit record. Use `login-session` first if Gmail is not already logged in.
+
+## External LLMs
+
+The default advisory model is the local Ollama/Gemma backend. Logging into ChatGPT in
+the browser is not automated by this project because that can send CV and application
+data to an external service and is brittle compared with an explicit API integration.
+If external model review is desired, add it as an opt-in provider with a clear privacy
+warning and environment-based credentials; do not make it part of unattended
+submission.
 
 ## Tracker Dashboard
 

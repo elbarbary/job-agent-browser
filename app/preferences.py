@@ -37,6 +37,8 @@ DEFAULT_USER_PREFERENCES: dict[str, Any] = {
         },
     ],
     "candidate_user_confirmed_facts": {
+        "profile_reviewed": False,
+        "contact_email": "needs_user_answer",
         "nationality": "needs_user_answer",
         "home_country": "needs_user_answer",
         "work_authorization_summary": "needs_user_answer",

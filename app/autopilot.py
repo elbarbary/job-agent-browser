@@ -27,6 +27,7 @@ DEFAULT_AUTOPILOT: dict[str, Any] = {
     "headless": True,
     "allowed_submit_hosts": [],
     "resume_path": "",
+    "require_profile_review": True,
     "block_file_uploads": True,
     "block_required_checkboxes": True,
     "block_unknown_required_fields": True,
@@ -34,6 +35,7 @@ DEFAULT_AUTOPILOT: dict[str, Any] = {
         f"Set standing_authorization exactly to: {AUTHORIZATION_PHRASE}",
         "Keep this file private. It represents standing permission to submit eligible applications.",
         "Autopilot submits only simple forms where required fields can be answered from CV/profile/preferences.",
+        "Autopilot requires candidate_user_confirmed_facts.profile_reviewed=true by default.",
         "Autopilot blocks file uploads, required checkboxes, payments, destructive actions, and unknown required answers.",
     ],
 }
@@ -108,4 +110,6 @@ def decide_autopilot_for_job(
         reasons.append("candidate name is unknown")
     if not is_known(answers.get("email")):
         reasons.append("candidate email is unknown")
+    if config.get("require_profile_review", True) is True and answers.get("_profile_reviewed") is not True:
+        reasons.append("candidate profile facts have not been user-reviewed")
     return AutopilotDecision(allowed=not reasons, reasons=reasons)

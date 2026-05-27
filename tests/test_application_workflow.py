@@ -17,7 +17,7 @@ class ApplicationWorkflowTests(unittest.TestCase):
             settings.ensure_directories()
             profile = {
                 "name": "Ada Example",
-                "email": "ada@example.test",
+                "email": "extracted-wrong@example.test",
                 "phone": None,
                 "location": None,
                 "skills": ["Python Linux"],
@@ -32,6 +32,8 @@ class ApplicationWorkflowTests(unittest.TestCase):
             profile_path.write_text(json.dumps(profile), encoding="utf-8")
             preferences = {
                 "candidate_user_confirmed_facts": {
+                    "profile_reviewed": True,
+                    "contact_email": "ada@example.test",
                     "work_authorization_summary": "User-confirmed work authorization answer.",
                     "availability": "User-confirmed availability.",
                     "salary_target": "needs_user_answer",
@@ -57,6 +59,9 @@ class ApplicationWorkflowTests(unittest.TestCase):
             workflow = ApplicationWorkflow(settings, recorder)
             draft = json.loads(workflow.draft("abc123").read_text(encoding="utf-8"))
             self.assertEqual(draft["status"], "draft_only_no_submission")
+            self.assertEqual(draft["answers"]["email"], "ada@example.test")
+            self.assertEqual(draft["answers"]["_email_source"], "user_confirmed_preferences")
+            self.assertTrue(draft["answers"]["_profile_reviewed"])
             self.assertEqual(
                 draft["answers"]["work_authorization"],
                 "User-confirmed work authorization answer.",
