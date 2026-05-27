@@ -300,13 +300,43 @@ single private token. Initialize the private config:
 chmod 600 data/profiles/telegram.json
 ```
 
-Create a bot with BotFather, message the bot once, then set `enabled`, `bot_token`,
-`chat_id`, and optionally `notify_on_worker_run` in `data/profiles/telegram.json`.
-You can send a test status update with:
+Set it up:
+
+1. Open Telegram and message `@BotFather`.
+2. Send `/newbot`, choose a name/username, and copy the bot token.
+3. Open your new bot chat and send it any message, such as `hi`.
+4. On the server, fetch recent updates:
+
+```bash
+TOKEN="paste_bot_token_here"
+curl "https://api.telegram.org/bot${TOKEN}/getUpdates"
+```
+
+5. Find `message.chat.id` in the JSON response.
+6. Edit `data/profiles/telegram.json`:
+
+```json
+{
+  "enabled": true,
+  "bot_token": "paste_bot_token_here",
+  "chat_id": "paste_chat_id_here",
+  "notify_on_worker_run": true
+}
+```
+
+You can also set `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`,
+`TELEGRAM_ENABLED=true`, and `TELEGRAM_NOTIFY_ON_WORKER_RUN=true` in `.env`, but
+do not commit `.env`.
+
+Send a test status update:
 
 ```bash
 .venv/bin/python -m app.main notify-status --telegram
 ```
+
+The notification includes counts for jobs, drafts, submissions, recent submitted
+roles, pending drafts, and worker errors. It does not send CVs, cookies, browser
+sessions, raw logs, or application files.
 
 WhatsApp is possible, but it is not a lightweight personal connector: it usually
 requires WhatsApp Business Platform setup, a Meta app, a phone number, webhook
