@@ -266,6 +266,53 @@ safe submit/apply button only if no blockers are found. Every attempt is written
 the audit log. Successful submit clicks also create a private local ledger entry in
 `data/applications/submissions/` so the worker does not submit the same job again.
 
+An autopilot submission record means the agent clicked the final submit/apply button
+and saved an audit trail. It does not guarantee the ATS will send a confirmation
+email. Some sites send no email, some delay it, some route it to the email field used
+in the CV/profile, and some require backend validation after the click.
+
+## Tracker Dashboard
+
+Check current status from the CLI:
+
+```bash
+.venv/bin/python -m app.main status
+.venv/bin/python -m app.main status --write-html
+```
+
+Run the local-only dashboard:
+
+```bash
+.venv/bin/python -m app.main dashboard
+```
+
+It binds to `127.0.0.1:7860` by default and shows jobs, draft answers, questions,
+submission records, and worker state. The generated HTML and all tracker data stay
+under ignored `data/applications/`.
+
+## Telegram Notifications
+
+Telegram is the easiest chat connector because a bot can send status messages with a
+single private token. Initialize the private config:
+
+```bash
+.venv/bin/python -m app.main init-telegram
+chmod 600 data/profiles/telegram.json
+```
+
+Create a bot with BotFather, message the bot once, then set `enabled`, `bot_token`,
+`chat_id`, and optionally `notify_on_worker_run` in `data/profiles/telegram.json`.
+You can send a test status update with:
+
+```bash
+.venv/bin/python -m app.main notify-status --telegram
+```
+
+WhatsApp is possible, but it is not a lightweight personal connector: it usually
+requires WhatsApp Business Platform setup, a Meta app, a phone number, webhook
+configuration, and template/message approval. Start with Telegram unless there is a
+specific reason to use WhatsApp.
+
 ## Daily Update And Optional Email
 
 Generate a local markdown update:

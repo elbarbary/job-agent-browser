@@ -18,6 +18,8 @@ from .email_notifier import generate_daily_update
 from .job_sources import discover_public_feed_jobs
 from .job_search import search_and_rank_jobs
 from .llm_client import LocalLLMClient, LocalLLMError
+from .telegram_notifier import TelegramConfigurationError, load_telegram_config, send_telegram_message, telegram_ready
+from .tracker import format_tracker_chat, tracker_status
 from .watchlist import load_watchlist
 from .webabi.recorder import AuditRecorder
 
@@ -167,6 +169,15 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
     status_path = settings.applications_dir / "worker_status.json"
     status_path.write_text(json.dumps(status, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
     status_path.chmod(0o600)
+    telegram_config = load_telegram_config(settings)
+    if telegram_ready(telegram_config) and telegram_config.get("notify_on_worker_run"):
+        try:
+            send_telegram_message(settings, format_tracker_chat(tracker_status(settings)))
+        except (TelegramConfigurationError, Exception) as exc:
+            errors.append(f"Telegram notification failed: {exc}")
+            status["errors"] = errors
+            status_path.write_text(json.dumps(status, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+            LOGGER.exception("telegram notification failed")
     LOGGER.info("worker run complete: %s", status)
     return status
 

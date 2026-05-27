@@ -18,6 +18,8 @@ from .job_search import search_and_rank_jobs
 from .llm_client import LocalLLMClient, LocalLLMError
 from .policy import PolicyViolation, RiskClass, require_typed_confirmation
 from .preferences import write_default_preferences
+from .telegram_notifier import TelegramConfigurationError, send_telegram_message, write_default_telegram
+from .tracker import format_tracker_text, format_tracker_chat, serve_tracker, tracker_status, write_tracker_html
 from .watchlist import write_default_watchlist
 from .webabi.recorder import AuditRecorder
 from .webabi.replay import summarize_log
@@ -35,6 +37,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init-preferences", help="Write the private user-confirmed job preference profile")
     sub.add_parser("init-watchlist", help="Write the private background worker watchlist")
     sub.add_parser("init-autopilot", help="Write the private opt-in autopilot submission template")
+    sub.add_parser("init-telegram", help="Write the private optional Telegram notification template")
+    status = sub.add_parser("status", help="Show jobs, drafts, submissions, and worker state")
+    status.add_argument("--json", action="store_true", help="Print machine-readable tracker JSON")
+    status.add_argument("--write-html", action="store_true", help="Write data/applications/tracker.html")
+    dashboard = sub.add_parser("dashboard", help="Serve the local-only tracker dashboard")
+    dashboard.add_argument("--host", default=None)
+    dashboard.add_argument("--port", type=int, default=None)
+    notify = sub.add_parser("notify-status", help="Send current tracker status to a configured notifier")
+    notify.add_argument("--telegram", action="store_true", help="Send through private Telegram bot config")
     worker_once = sub.add_parser("worker-once", help="Run one safe background worker cycle")
     worker_once.add_argument("--no-llm", action="store_true", help="Disable LLM advisory for this run")
     worker = sub.add_parser("worker", help="Run the safe background worker forever")
@@ -195,6 +206,28 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
         path = write_default_autopilot(settings)
         print(f"Autopilot template saved: {path}")
         return 0
+    if args.command == "init-telegram":
+        path = write_default_telegram(settings)
+        print(f"Telegram template saved: {path}")
+        return 0
+    if args.command == "status":
+        status = tracker_status(settings)
+        if args.write_html:
+            print(f"Tracker HTML: {write_tracker_html(settings)}")
+        if args.json:
+            print(json.dumps(status, indent=2, ensure_ascii=True))
+        else:
+            print(format_tracker_text(status))
+        return 0
+    if args.command == "dashboard":
+        serve_tracker(settings, args.host, args.port)
+        return 0
+    if args.command == "notify-status":
+        if not args.telegram:
+            raise TelegramConfigurationError("Choose a notifier, for example --telegram.")
+        send_telegram_message(settings, format_tracker_chat(tracker_status(settings)))
+        print("Telegram status sent.")
+        return 0
     if args.command == "review-jobs":
         _review_jobs(settings)
         return 0
@@ -242,6 +275,7 @@ def main() -> int:
         LocalLLMError,
         PolicyViolation,
         EmailConfigurationError,
+        TelegramConfigurationError,
     ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
