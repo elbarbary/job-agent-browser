@@ -36,10 +36,15 @@ class TrackerTests(unittest.TestCase):
                 json.dumps({"submitted_at": "2026-01-01T00:00:00+00:00"}),
                 encoding="utf-8",
             )
+            (settings.applications_dir / "submission_attempts" / "job-2.json").write_text(
+                json.dumps({"attempted_at": "2026-01-02T00:00:00+00:00"}),
+                encoding="utf-8",
+            )
             status = tracker_status(settings)
             self.assertEqual(status["counts"]["jobs"], 1)
             self.assertEqual(status["counts"]["drafts"], 1)
             self.assertEqual(status["counts"]["submitted"], 1)
+            self.assertEqual(status["counts"]["unverified_submit_clicks"], 1)
             self.assertEqual(status["jobs"][0]["state"], "submitted")
             self.assertIn("Product Engineer", format_tracker_text(status))
             self.assertIn("Submitted:", format_tracker_chat(status))

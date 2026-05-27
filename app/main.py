@@ -149,6 +149,8 @@ async def _run_async(args: argparse.Namespace, settings: Settings) -> int:
         )
         if result.get("submitted"):
             workflow.record_autopilot_submission(args.job_id, result)
+        elif result.get("clicked"):
+            workflow.record_autopilot_attempt(args.job_id, result)
         print(json.dumps(result, indent=2, ensure_ascii=True))
         return 0 if result.get("submitted") else 2
     if args.command == "worker-once":

@@ -260,6 +260,8 @@ class BrowserEngine:
             await page.evaluate(_click_submit_script(submit_index))
             await asyncio.sleep(2.0)
             page_url = str(await page.get_url())
+            post_state = _decoded_json(await page.evaluate(AUTOPILOT_POST_SUBMIT_SCRIPT))
+            verified = _submission_verified(post_state)
             screenshot_path = self._save_read_only_screenshot(await page.screenshot(), "autopilot-submit")
             self.recorder.record(
                 ActionRecord(
@@ -276,13 +278,26 @@ class BrowserEngine:
                         "all required fields were mapped to known answers",
                         "submit host was privately allowlisted",
                     ],
-                    postconditions=["submit/apply button clicked", "audit screenshot saved"],
+                    postconditions=[
+                        "submit/apply button clicked",
+                        "post-submit page checked for confirmation",
+                        "audit screenshot saved",
+                    ],
                     screenshot_path=str(screenshot_path),
-                    result="submit_clicked",
+                    result="submit_confirmed" if verified else "submit_clicked_unverified",
+                    errors=[] if verified else ["No post-submit confirmation was detected."],
                     approved=True,
                 )
             )
-            return {"submitted": True, "blocked": False, "errors": [], "fills": _audit_fills(fills)}
+            return {
+                "submitted": verified,
+                "clicked": True,
+                "blocked": False,
+                "verified": verified,
+                "errors": [] if verified else ["No post-submit confirmation was detected."],
+                "post_submit_url": page_url,
+                "fills": _audit_fills(fills),
+            }
         finally:
             await browser.stop()
 
@@ -535,14 +550,50 @@ def _plan_form_fills(
 
 def _choose_submit_button(buttons: list[dict[str, Any]]) -> dict[str, Any] | None:
     blocked = ("delete", "withdraw", "remove", "pay", "purchase", "checkout")
-    preferred = ("submit application", "submit", "apply now", "apply")
+    candidates: list[tuple[int, dict[str, Any]]] = []
     for button in buttons:
         text = str(button.get("text", "")).casefold()
         if not text or any(word in text for word in blocked):
             continue
-        if any(word in text for word in preferred):
-            return button
+        form_index = int(button.get("form_index", -1))
+        if "submit" in text:
+            priority = 0 if form_index >= 0 else 2
+        elif "apply" in text:
+            priority = 1 if form_index >= 0 else 4
+        else:
+            continue
+        candidates.append((priority, button))
+    if candidates:
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1]
     return None
+
+
+AUTOPILOT_POST_SUBMIT_SCRIPT = """() => ({
+    title: document.title || '',
+    url: location.href,
+    text: (document.body && document.body.innerText || '').slice(0, 5000)
+})"""
+
+
+def _submission_verified(post_state: Any) -> bool:
+    if not isinstance(post_state, dict):
+        return False
+    haystack = " ".join(str(post_state.get(key, "")) for key in ("title", "url", "text")).casefold()
+    success_markers = (
+        "application submitted",
+        "application received",
+        "successfully submitted",
+        "we received your application",
+        "we have received your application",
+        "thanks for applying",
+        "thank you for applying",
+        "thank you for your application",
+        "your application has been received",
+        "your application was sent",
+        "submission received",
+    )
+    return any(marker in haystack for marker in success_markers)
 
 
 def _fill_form_script(fills: list[dict[str, Any]]) -> str:

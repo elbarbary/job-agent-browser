@@ -148,6 +148,11 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
             if result.get("submitted"):
                 workflow.record_autopilot_submission(job_id, result)
                 autopilot_submitted.append(job_id)
+            elif result.get("clicked"):
+                workflow.record_autopilot_attempt(job_id, result)
+                autopilot_blocked.append(
+                    {"job_id": job_id, "reasons": result.get("errors", ["submit click was unverified"])}
+                )
             else:
                 autopilot_blocked.append({"job_id": job_id, "reasons": result.get("errors", [])})
         except Exception as exc:

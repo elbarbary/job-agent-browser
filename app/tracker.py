@@ -36,13 +36,21 @@ def tracker_status(settings: Settings) -> dict[str, Any]:
     jobs = ApplicationRepository(settings).load_jobs()
     drafts = _read_json_dir(settings.applications_dir / "drafts")
     submissions = _read_json_dir(settings.applications_dir / "submissions")
+    attempts = _read_json_dir(settings.applications_dir / "submission_attempts")
     approvals = _read_json_dir(settings.applications_dir / "approvals")
     worker_status = _read_json(settings.applications_dir / "worker_status.json", {})
 
     rows: list[dict[str, Any]] = []
     for job in jobs:
         job_id = str(job.get("id", ""))
-        state = "submitted" if job_id in submissions else "drafted" if job_id in drafts else "found"
+        if job_id in submissions:
+            state = "submitted"
+        elif job_id in attempts:
+            state = "unverified_submit_click"
+        elif job_id in drafts:
+            state = "drafted"
+        else:
+            state = "found"
         rows.append(
             {
                 "id": job_id,
@@ -55,6 +63,7 @@ def tracker_status(settings: Settings) -> dict[str, Any]:
                 "risks_uncertainties": job.get("risks_uncertainties") or [],
                 "draft": drafts.get(job_id),
                 "submission": submissions.get(job_id),
+                "submission_attempt": attempts.get(job_id),
                 "approval": approvals.get(job_id),
             }
         )
@@ -65,6 +74,7 @@ def tracker_status(settings: Settings) -> dict[str, Any]:
             "jobs": len(jobs),
             "drafts": len(drafts),
             "submitted": len(submissions),
+            "unverified_submit_clicks": len(attempts),
             "approvals": len(approvals),
         },
         "worker_status": worker_status,
@@ -81,6 +91,7 @@ def format_tracker_text(status: dict[str, Any]) -> str:
         f"Jobs known: {counts['jobs']}",
         f"Drafts: {counts['drafts']}",
         f"Submitted: {counts['submitted']}",
+        f"Unverified submit-clicks: {counts['unverified_submit_clicks']}",
         f"Approvals: {counts['approvals']}",
         "",
         "Jobs:",
@@ -102,9 +113,13 @@ def format_tracker_chat(status: dict[str, Any]) -> str:
     counts = status["counts"]
     lines = [
         "Job Agent update",
-        f"Jobs: {counts['jobs']} | Drafts: {counts['drafts']} | Submitted: {counts['submitted']}",
+        (
+            f"Jobs: {counts['jobs']} | Drafts: {counts['drafts']} | "
+            f"Submitted: {counts['submitted']} | Unverified clicks: {counts['unverified_submit_clicks']}"
+        ),
     ]
     submitted = [job for job in status["jobs"] if job["state"] == "submitted"]
+    attempts = [job for job in status["jobs"] if job["state"] == "unverified_submit_click"]
     drafted = [job for job in status["jobs"] if job["state"] == "drafted"]
     if submitted:
         lines.append("")
@@ -116,6 +131,11 @@ def format_tracker_chat(status: dict[str, Any]) -> str:
         lines.append("Drafted / pending:")
         for job in drafted[:5]:
             lines.append(f"- {job['title']} at {job['company']} (score {job['score']})")
+    if attempts:
+        lines.append("")
+        lines.append("Unverified submit-clicks:")
+        for job in attempts[:5]:
+            lines.append(f"- {job['title']} at {job['company']}")
     worker_errors = status.get("worker_status", {}).get("errors") or []
     if worker_errors:
         lines.append("")
@@ -136,7 +156,9 @@ def render_tracker_html(status: dict[str, Any]) -> str:
             for key, value in answers.items()
         )
         submission = job.get("submission") or {}
+        attempt = job.get("submission_attempt") or {}
         submitted_at = html.escape(str(submission.get("submitted_at", "")))
+        attempted_at = html.escape(str(attempt.get("attempted_at", "")))
         rows.append(
             f"""
             <article class="job {html.escape(job['state'])}">
@@ -149,6 +171,7 @@ def render_tracker_html(status: dict[str, Any]) -> str:
               <a href="{html.escape(str(job['url']))}">{html.escape(str(job['url']))}</a>
               <p>{html.escape(str(job.get('location') or ''))}</p>
               <p>{'Submitted at: ' + submitted_at if submitted_at else ''}</p>
+              <p>{'Unverified click at: ' + attempted_at if attempted_at else ''}</p>
               <details>
                 <summary>Risks / questions</summary>
                 <ul>{risks or '<li>None recorded.</li>'}</ul>
@@ -192,6 +215,7 @@ def render_tracker_html(status: dict[str, Any]) -> str:
     <div class="card"><strong>{counts['jobs']}</strong><br>jobs</div>
     <div class="card"><strong>{counts['drafts']}</strong><br>drafts</div>
     <div class="card"><strong>{counts['submitted']}</strong><br>submitted</div>
+    <div class="card"><strong>{counts['unverified_submit_clicks']}</strong><br>unverified clicks</div>
     <div class="card"><strong>{counts['approvals']}</strong><br>approvals</div>
   </section>
   {body}

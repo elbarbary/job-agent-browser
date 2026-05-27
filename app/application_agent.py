@@ -50,11 +50,17 @@ class ApplicationRepository:
     def submission_path(self, job_id: str) -> Path:
         return self.settings.applications_dir / "submissions" / f"{job_id}.json"
 
+    def submission_attempt_path(self, job_id: str) -> Path:
+        return self.settings.applications_dir / "submission_attempts" / f"{job_id}.json"
+
     def has_submission(self, job_id: str) -> bool:
         return self.submission_path(job_id).exists()
 
     def record_submission(self, job_id: str, payload: dict[str, Any]) -> Path:
         return _write_private_json(self.submission_path(job_id), payload)
+
+    def record_submission_attempt(self, job_id: str, payload: dict[str, Any]) -> Path:
+        return _write_private_json(self.submission_attempt_path(job_id), payload)
 
 
 class ApplicationWorkflow:
@@ -144,6 +150,18 @@ class ApplicationWorkflow:
             "note": "Autopilot clicked the final submit/apply button after private standing authorization.",
         }
         return self.repository.record_submission(job_id, payload)
+
+    def record_autopilot_attempt(self, job_id: str, result: dict[str, Any]) -> Path:
+        job_data = self.repository.find_job(job_id)
+        payload = {
+            "job_id": job_id,
+            "job_url": job_data.get("url"),
+            "attempted_at": datetime.now(UTC).isoformat(),
+            "execution": "autopilot_submit_clicked_unverified",
+            "result": result,
+            "note": "Autopilot clicked a submit/apply button, but no post-submit confirmation was detected.",
+        }
+        return self.repository.record_submission_attempt(job_id, payload)
 
 
 def _ranked_job_fields(job: dict[str, Any]) -> dict[str, Any]:

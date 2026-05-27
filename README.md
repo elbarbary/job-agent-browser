@@ -267,9 +267,13 @@ the audit log. Successful submit clicks also create a private local ledger entry
 `data/applications/submissions/` so the worker does not submit the same job again.
 
 An autopilot submission record means the agent clicked the final submit/apply button
-and saved an audit trail. It does not guarantee the ATS will send a confirmation
-email. Some sites send no email, some delay it, some route it to the email field used
-in the CV/profile, and some require backend validation after the click.
+and then detected a post-submit confirmation message such as "application received"
+or "thank you for applying." If it clicks a button but cannot detect confirmation,
+the tracker records an `unverified_submit_click` instead of a submission.
+
+No email confirmation is guaranteed. Some sites send no email, some delay it, some
+route it to the email field used in the CV/profile, and some require backend
+validation after the click.
 
 ## Tracker Dashboard
 
@@ -287,8 +291,8 @@ Run the local-only dashboard:
 ```
 
 It binds to `127.0.0.1:7860` by default and shows jobs, draft answers, questions,
-submission records, and worker state. The generated HTML and all tracker data stay
-under ignored `data/applications/`.
+verified submission records, unverified submit-click attempts, and worker state. The
+generated HTML and all tracker data stay under ignored `data/applications/`.
 
 ## Telegram Notifications
 
