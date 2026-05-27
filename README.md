@@ -131,6 +131,23 @@ CV extraction. For example, if the extracted email is wrong, set:
 standing auto-submit from using a misread CV name, email, phone number, or other
 identity fact before you have checked the private profile data.
 
+Generate a private checklist of extracted and user-confirmed facts:
+
+```bash
+.venv/bin/python -m app.main profile-review
+```
+
+Review `data/profiles/profile_review.md`, plus the source files it points to. After
+you have corrected any mistakes, mark the facts reviewed:
+
+```bash
+.venv/bin/python -m app.main confirm-profile
+```
+
+The confirmation command requires typing `CONFIRM PROFILE`. This unlocks only the
+profile-review gate; autopilot still needs its separate private standing
+authorization and all other safety checks.
+
 ## 24/7 Worker
 
 The background worker runs locally and safely:

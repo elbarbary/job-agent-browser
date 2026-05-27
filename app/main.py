@@ -18,6 +18,7 @@ from .job_search import search_and_rank_jobs
 from .llm_client import LocalLLMClient, LocalLLMError
 from .policy import PolicyViolation, RiskClass, require_typed_confirmation
 from .preferences import write_default_preferences
+from .profile_review import CONFIRM_PROFILE_PHRASE, build_profile_review, mark_profile_reviewed
 from .telegram_notifier import TelegramConfigurationError, send_telegram_message, write_default_telegram
 from .tracker import format_tracker_text, format_tracker_chat, serve_tracker, tracker_status, write_tracker_html
 from .watchlist import write_default_watchlist
@@ -40,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Gmail search query to open in the saved browser session",
     )
     sub.add_parser("smoke-test", help="Open example.com safely and report visible interactive items")
+    sub.add_parser("profile-review", help="Generate a private profile fact review checklist")
+    sub.add_parser("confirm-profile", help="Mark private profile facts as user-reviewed after typed confirmation")
     sub.add_parser("init-preferences", help="Write the private user-confirmed job preference profile")
     sub.add_parser("init-watchlist", help="Write the private background worker watchlist")
     sub.add_parser("init-autopilot", help="Write the private opt-in autopilot submission template")
@@ -206,6 +209,20 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
         print(json.dumps(client.status(), indent=2))
         if args.test:
             print(f"Model reply: {client.smoke_test()}")
+        return 0
+    if args.command == "profile-review":
+        path = build_profile_review(settings)
+        print(f"Profile review saved: {path}")
+        print("Review it before running confirm-profile.")
+        return 0
+    if args.command == "confirm-profile":
+        review_path = build_profile_review(settings)
+        print(f"Review file: {review_path}")
+        print("Only continue if candidate_profile.json and job_preferences.json are accurate.")
+        actual = input(f"Type {CONFIRM_PROFILE_PHRASE} to unlock reviewed-profile autopilot eligibility: ")
+        require_typed_confirmation(actual, CONFIRM_PROFILE_PHRASE)
+        path = mark_profile_reviewed(settings)
+        print(f"Profile review confirmed in: {path}")
         return 0
     if args.command == "init-preferences":
         path = write_default_preferences(settings)
