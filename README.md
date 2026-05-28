@@ -456,6 +456,35 @@ latest log with:
 .venv/bin/python -m app.main audit-log
 ```
 
+## Browser For AI
+
+The WebABI layer can also save a structured "browser for AI" snapshot. It is the
+agent-facing equivalent of what a visual browser gives a human: page title, URL,
+headings, visible text, forms, fields, labels, required flags, links, buttons,
+visible errors, risk hints, and a screenshot.
+
+```bash
+.venv/bin/python -m app.main page-context \
+  "https://www.arbeitnow.com/jobs/companies/example/example-role-123"
+```
+
+Outputs are private JSON files under:
+
+```text
+data/logs/page_contexts/
+```
+
+For logged-in pages, use the saved browser profile:
+
+```bash
+.venv/bin/python -m app.main page-context "https://example.com/account" --persistent
+```
+
+Use `--allow-any-url` only for read-only inspection of a page outside
+`JOB_AGENT_ALLOWED_HOSTS`. This command does not click or submit anything; it only
+translates the browser-rendered page into structured context so the AI can reason
+about meaning on top of the same page a human would see.
+
 ## Current Scope
 
 This MVP omits a web dashboard. Autopilot uses conservative generic form handling;

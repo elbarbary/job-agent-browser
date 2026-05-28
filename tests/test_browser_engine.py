@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from app.browser_engine import _is_arbeitnow_job_page, _post_submit_errors, _submission_verified
+from app.browser_engine import (
+    AI_PAGE_CONTEXT_SCRIPT,
+    _is_arbeitnow_job_page,
+    _post_submit_errors,
+    _submission_verified,
+)
 
 
 class BrowserEngineHelperTests(unittest.TestCase):
@@ -47,6 +52,10 @@ class BrowserEngineHelperTests(unittest.TestCase):
             errors,
             ["terms: The terms field is required.", "email: The email must be valid."],
         )
+
+    def test_ai_page_context_script_exposes_browser_semantics(self) -> None:
+        for expected in ("forms", "fields", "actions", "headings", "visible_errors", "risk_hint"):
+            self.assertIn(expected, AI_PAGE_CONTEXT_SCRIPT)
 
 
 if __name__ == "__main__":

@@ -40,6 +40,19 @@ def build_parser() -> argparse.ArgumentParser:
         default="application OR applied OR interview OR thank you",
         help="Gmail search query to open in the saved browser session",
     )
+    context = sub.add_parser("page-context", help="Save a structured browser-for-AI page context")
+    context.add_argument("url")
+    context.add_argument(
+        "--allow-any-url",
+        action="store_true",
+        help="Allow read-only context extraction outside JOB_AGENT_ALLOWED_HOSTS",
+    )
+    context.add_argument(
+        "--persistent",
+        action="store_true",
+        help="Use the saved local browser session for logged-in pages",
+    )
+    context.add_argument("--headed", action="store_true", help="Show the browser while extracting context")
     sub.add_parser("smoke-test", help="Open example.com safely and report visible interactive items")
     sub.add_parser("profile-review", help="Generate a private profile fact review checklist")
     sub.add_parser("confirm-profile", help="Mark private profile facts as user-reviewed after typed confirmation")
@@ -116,6 +129,16 @@ async def _run_async(args: argparse.Namespace, settings: Settings) -> int:
         print(f"Gmail visible search text saved: {output}")
         print(f"Audit log: {recorder.path}")
         return 0
+    if args.command == "page-context":
+        output = await BrowserEngine(settings, recorder).ai_page_context(
+            args.url,
+            allowed_url=not args.allow_any_url,
+            persistent=args.persistent,
+            headed=args.headed,
+        )
+        print(f"AI page context saved: {output}")
+        print(f"Audit log: {recorder.path}")
+        return 0
     if args.command == "smoke-test":
         observed = await BrowserEngine(settings, recorder).smoke_test()
         print(f"Opened: {observed.title} ({observed.url})")
@@ -181,7 +204,7 @@ async def _run_async(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def run(args: argparse.Namespace, settings: Settings) -> int:
-    if args.command in {"login-session", "gmail-check", "smoke-test", "search-jobs", "worker-once", "worker"} or (
+    if args.command in {"login-session", "gmail-check", "page-context", "smoke-test", "search-jobs", "worker-once", "worker"} or (
         args.command == "apply" and (args.confirm or args.auto_submit)
     ):
         if args.command == "apply" and (args.confirm or args.auto_submit) and args.with_llm:

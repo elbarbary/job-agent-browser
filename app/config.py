@@ -100,6 +100,7 @@ class Settings:
             self.log_dir,
             self.log_dir / "runs",
             self.log_dir / "screenshots",
+            self.log_dir / "page_contexts",
             self.applications_dir,
             self.applications_dir / "drafts",
             self.applications_dir / "approvals",

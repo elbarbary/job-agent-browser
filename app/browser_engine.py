@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -124,6 +125,73 @@ class BrowserEngine:
 
     async def smoke_test(self) -> PageObservation:
         return await self.observe_page("https://example.com", allowed_url=False)
+
+    async def ai_page_context(
+        self,
+        url: str,
+        *,
+        allowed_url: bool = True,
+        persistent: bool = False,
+        headed: bool = False,
+    ) -> Path:
+        if allowed_url and not self.settings.is_allowed_url(url):
+            raise BrowserSafetyError(f"AI page-context navigation is not permitted for URL: {url}")
+        assert_action_allowed(RiskClass.READ_ONLY)
+        browser = self._new_browser(headed=headed, persistent=persistent, restricted=allowed_url)
+        try:
+            await browser.start()
+            page = await browser.new_page()
+            await page.goto(url)
+            await asyncio.sleep(1.0)
+            context = _decoded_json(await page.evaluate(AI_PAGE_CONTEXT_SCRIPT))
+            if not isinstance(context, dict):
+                context = {"raw": context}
+            page_url = str(await page.get_url())
+            title = str(context.get("title") or _decoded_json(await page.evaluate("() => document.title || ''")))
+            screenshot_path = self._save_read_only_screenshot(await page.screenshot(), "ai-page-context")
+            context.update(
+                {
+                    "schema": "job_agent.ai_page_context.v1",
+                    "run_id": self.recorder.run_id,
+                    "captured_at": datetime.now(UTC).isoformat(),
+                    "url": page_url,
+                    "title": title,
+                    "screenshot_path": str(screenshot_path),
+                }
+            )
+            output_dir = self.settings.log_dir / "page_contexts"
+            output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path = output_dir / f"{self.recorder.run_id}-{hashlib.sha256(page_url.encode('utf-8')).hexdigest()[:8]}.json"
+            path.write_text(json.dumps(context, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+            path.chmod(0o600)
+            candidates = [
+                ActionCandidate(
+                    label=str(action.get("label") or ""),
+                    action_type=str(action.get("role") or action.get("tag") or "action"),
+                    selector=action.get("selector"),
+                )
+                for action in context.get("actions", [])[:100]
+                if isinstance(action, dict)
+            ]
+            self.recorder.record(
+                ActionRecord(
+                    run_id=self.recorder.run_id,
+                    workflow="ai_page_context",
+                    page_url=page_url,
+                    page_title=title,
+                    visible_action_candidates=candidates,
+                    selected_action="extract_ai_browser_context",
+                    risk_classification=RiskClass.READ_ONLY,
+                    input_values={"url": url, "persistent_session": persistent},
+                    preconditions=["read-only navigation permitted"],
+                    postconditions=["semantic page context saved", "screenshot saved"],
+                    screenshot_path=str(screenshot_path),
+                    result="success",
+                )
+            )
+            return path
+        finally:
+            await browser.stop()
 
     async def manual_login_session(self) -> None:
         self.settings.ensure_directories()
@@ -624,6 +692,143 @@ def _decoded_json(value: Any) -> Any:
         return json.loads(value)
     except json.JSONDecodeError:
         return value
+
+
+AI_PAGE_CONTEXT_SCRIPT = """() => {
+    const MAX_ITEMS = 160;
+    const MAX_TEXT = 240;
+    const visible = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
+    };
+    const clean = (value, limit = MAX_TEXT) => String(value || '').replace(/\\s+/g, ' ').trim().slice(0, limit);
+    const selectorFor = (el) => {
+        if (!el || !el.tagName) return null;
+        if (el.id) return '#' + CSS.escape(el.id);
+        const attr = ['data-testid', 'data-test', 'aria-label', 'name'].find(name => el.getAttribute(name));
+        if (attr) return `${el.tagName.toLowerCase()}[${attr}="${CSS.escape(el.getAttribute(attr))}"]`;
+        const parent = el.parentElement;
+        if (!parent) return el.tagName.toLowerCase();
+        const siblings = Array.from(parent.children).filter(child => child.tagName === el.tagName);
+        if (siblings.length === 1) return el.tagName.toLowerCase();
+        return `${el.tagName.toLowerCase()}:nth-of-type(${siblings.indexOf(el) + 1})`;
+    };
+    const textFor = (el) => {
+        const parts = [];
+        if (el.id) {
+            document.querySelectorAll(`label[for="${CSS.escape(el.id)}"]`).forEach(label => parts.push(label.innerText || ''));
+        }
+        const label = el.closest('label');
+        if (label) parts.push(label.innerText || '');
+        parts.push(el.getAttribute('aria-label') || '');
+        parts.push(el.getAttribute('placeholder') || '');
+        parts.push(el.name || '');
+        parts.push(el.id || '');
+        parts.push(el.innerText || el.value || '');
+        return clean(parts.join(' '));
+    };
+    const riskHint = (label, tag, type, href) => {
+        const text = `${label} ${tag} ${type} ${href || ''}`.toLowerCase();
+        if (/pay|purchase|checkout|billing|credit card/.test(text)) return 'payment';
+        if (/delete|remove|withdraw|cancel account|terminate/.test(text)) return 'destructive';
+        if (/send email|send message|reply/.test(text)) return 'email_send';
+        if (/submit|apply|send application|complete application/.test(text)) return 'job_submit';
+        if (/login|sign in|log in|password/.test(text)) return 'account_login';
+        if (/input|textarea|select|upload|checkbox|radio/.test(`${tag} ${type}`)) return 'form_fill';
+        return 'read_only';
+    };
+    const valueState = (el) => {
+        const type = (el.type || '').toLowerCase();
+        if (['password', 'hidden', 'file'].includes(type)) return el.value ? '[REDACTED]' : '';
+        if (type === 'checkbox' || type === 'radio') return el.checked ? 'checked' : 'unchecked';
+        return el.value ? '[NON_EMPTY]' : '';
+    };
+    const forms = Array.from(document.querySelectorAll('form')).map((form, index) => ({
+        index,
+        selector: selectorFor(form),
+        method: clean(form.method || 'get', 20),
+        action: form.action || '',
+        label: clean(form.getAttribute('aria-label') || form.querySelector('h1,h2,h3,legend')?.innerText || form.innerText, 160),
+        visible: visible(form)
+    })).filter(form => form.visible).slice(0, 30);
+    const formElements = Array.from(document.querySelectorAll('input, textarea, select'))
+        .filter(el => visible(el) && !el.disabled)
+        .filter(el => !['hidden', 'submit', 'button', 'reset', 'image'].includes((el.type || '').toLowerCase()));
+    const fields = formElements.map((el, index) => {
+        const form = el.closest('form');
+        const formIndex = form ? Array.from(document.querySelectorAll('form')).indexOf(form) : -1;
+        return {
+            index,
+            selector: selectorFor(el),
+            tag: el.tagName.toLowerCase(),
+            type: (el.type || '').toLowerCase(),
+            name: el.name || '',
+            id: el.id || '',
+            label: textFor(el),
+            required: Boolean(el.required || el.getAttribute('aria-required') === 'true'),
+            autocomplete: el.getAttribute('autocomplete') || '',
+            value_state: valueState(el),
+            form_index: formIndex,
+            options: el.tagName.toLowerCase() === 'select'
+                ? Array.from(el.options || []).slice(0, 40).map(option => clean(option.innerText || option.value, 120))
+                : []
+        };
+    }).slice(0, MAX_ITEMS);
+    const actionElements = Array.from(document.querySelectorAll('a[href], button, input[type="submit"], input[type="button"], [role="button"], summary'))
+        .filter(el => visible(el) && !el.disabled);
+    const actions = actionElements.map((el, index) => {
+        const tag = el.tagName.toLowerCase();
+        const type = (el.type || '').toLowerCase();
+        const label = textFor(el);
+        const href = tag === 'a' ? el.href : '';
+        const form = el.closest('form');
+        const formIndex = form ? Array.from(document.querySelectorAll('form')).indexOf(form) : -1;
+        return {
+            index,
+            selector: selectorFor(el),
+            tag,
+            role: el.getAttribute('role') || (tag === 'a' ? 'link' : 'button'),
+            type,
+            label,
+            href,
+            form_index: formIndex,
+            risk_hint: riskHint(label, tag, type, href)
+        };
+    }).slice(0, MAX_ITEMS);
+    const headings = Array.from(document.querySelectorAll('h1,h2,h3,h4'))
+        .filter(visible)
+        .map(el => ({level: el.tagName.toLowerCase(), text: clean(el.innerText, 200), selector: selectorFor(el)}))
+        .slice(0, 80);
+    const textBlocks = Array.from(document.querySelectorAll('main p, main li, article p, article li, section p, section li, label, legend, [role="alert"]'))
+        .filter(visible)
+        .map(el => clean(el.innerText, 220))
+        .filter(Boolean)
+        .slice(0, MAX_ITEMS);
+    const visibleErrors = Array.from(document.querySelectorAll('[id^="error-"], [role="alert"], .error, .errors, .invalid-feedback, .text-red-500'))
+        .filter(el => visible(el) && clean(el.innerText))
+        .map(el => ({selector: selectorFor(el), text: clean(el.innerText, 240)}))
+        .slice(0, 60);
+    const meta = Array.from(document.querySelectorAll('meta[name], meta[property]'))
+        .map(el => ({name: el.getAttribute('name') || el.getAttribute('property'), content: clean(el.getAttribute('content'), 240)}))
+        .filter(item => ['description', 'og:title', 'og:description'].includes(item.name))
+        .slice(0, 20);
+    return {
+        url: location.href,
+        title: document.title || '',
+        language: document.documentElement.lang || '',
+        viewport: {width: window.innerWidth, height: window.innerHeight},
+        meta,
+        headings,
+        forms,
+        fields,
+        actions,
+        visible_errors: visibleErrors,
+        text_blocks: textBlocks,
+        visible_text_excerpt: clean(document.body?.innerText || '', 4000)
+    };
+}"""
 
 
 ARBEITNOW_SNAPSHOT_SCRIPT = """() => {
