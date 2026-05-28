@@ -11,16 +11,31 @@ from .config import Settings
 from .cv_store import load_profile
 from .job_profile import RankedJob, match_job
 from .preferences import load_preferences
+from .web_search import build_job_search_terms, search_web
 from .webabi.recorder import AuditRecorder
 
 
 def build_search_url(query: str, location: str) -> str:
-    terms = (
-        f"{query} {location} "
-        "(site:jobs.lever.co OR site:boards.greenhouse.io OR site:job-boards.greenhouse.io "
-        "OR site:careers.smartrecruiters.com)"
-    )
+    terms = build_job_search_terms(query, location)
     return f"https://html.duckduckgo.com/html/?q={quote_plus(terms)}"
+
+
+async def discover_web_search_links(
+    settings: Settings,
+    query: str,
+    location: str,
+    *,
+    max_results: int,
+) -> list[dict[str, str]]:
+    terms = build_job_search_terms(query, location)
+    results = await search_web(settings, terms, max_results=max_results * 3)
+    links: list[dict[str, str]] = []
+    for result in results:
+        if settings.is_allowed_url(result.url):
+            links.append({"title": result.title, "url": result.url, "description": result.snippet})
+        if len(links) >= max_results:
+            break
+    return links
 
 
 def merge_ranked_jobs(existing: list[dict[str, object]], discovered: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -51,7 +66,10 @@ async def search_and_rank_jobs(
     if source_url:
         links = [await engine.read_job_detail(source_url)]
     else:
-        links = await engine.extract_job_links(build_search_url(query, location))
+        if settings.web_search_provider == "searxng":
+            links = await discover_web_search_links(settings, query, location, max_results=max_results)
+        else:
+            links = await engine.extract_job_links(build_search_url(query, location))
     jobs: list[dict[str, object]] = []
     seen: set[str] = set()
     for link in links[:max_results]:
@@ -68,7 +86,11 @@ async def search_and_rank_jobs(
                 location=location,
                 url=detail["url"],
                 description=detail.get("description", ""),
-                source="approved_source_url" if source_url else "duckduckgo_public_ats_search",
+                source=(
+                    "approved_source_url"
+                    if source_url
+                    else ("local_searxng_web_search" if settings.web_search_provider == "searxng" else "duckduckgo_public_ats_search")
+                ),
             ),
             profile,
             preferences,

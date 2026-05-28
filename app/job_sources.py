@@ -130,7 +130,18 @@ class FeedItem:
 
 async def _fetch_all(client: httpx.AsyncClient) -> list[FeedItem]:
     results: list[FeedItem] = []
-    for query in ("ai product", "machine learning", "llm", "software engineer", "product engineer"):
+    for query in (
+        "ai product",
+        "ai engineer",
+        "machine learning",
+        "llm",
+        "software engineer",
+        "product engineer",
+        "data engineer",
+        "automation engineer",
+        "junior developer",
+        "graduate engineer",
+    ):
         results.extend(await _remotive(client, query))
     results.extend(await _remoteok(client))
     results.extend(await _arbeitnow(client))
@@ -179,21 +190,25 @@ async def _remoteok(client: httpx.AsyncClient) -> list[FeedItem]:
 
 
 async def _arbeitnow(client: httpx.AsyncClient) -> list[FeedItem]:
-    response = await client.get("https://www.arbeitnow.com/api/job-board-api")
-    response.raise_for_status()
-    payload = response.json()
     items: list[FeedItem] = []
-    for job in payload.get("data", []):
-        items.append(
-            FeedItem(
-                source="arbeitnow_public_api",
-                title=str(job.get("title") or ""),
-                company=job.get("company_name"),
-                location=job.get("location"),
-                url=str(job.get("url") or ""),
-                description=clean_html(str(job.get("description") or "")),
+    # Arbeitnow's public API is paginated. The first page alone is too small
+    # for a continuously running worker, so sample several pages while keeping
+    # the request count bounded.
+    for page in range(1, 6):
+        response = await client.get("https://www.arbeitnow.com/api/job-board-api", params={"page": page})
+        response.raise_for_status()
+        payload = response.json()
+        for job in payload.get("data", []):
+            items.append(
+                FeedItem(
+                    source="arbeitnow_public_api",
+                    title=str(job.get("title") or ""),
+                    company=job.get("company_name"),
+                    location=job.get("location"),
+                    url=str(job.get("url") or ""),
+                    description=clean_html(str(job.get("description") or "")),
+                )
             )
-        )
     return items
 
 

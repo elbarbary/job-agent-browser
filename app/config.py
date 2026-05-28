@@ -19,7 +19,16 @@ DEFAULT_ALLOWED_HOSTS = (
     "jobs.lever.co",
     "boards.greenhouse.io",
     "job-boards.greenhouse.io",
+    "job-boards.eu.greenhouse.io",
+    "boards.eu.greenhouse.io",
     "careers.smartrecruiters.com",
+    "jobs.ashbyhq.com",
+    "jobs.workable.com",
+    "apply.workable.com",
+    "www.arbeitnow.com",
+    "arbeitnow.com",
+    "remoteok.com",
+    "remotive.com",
 )
 
 
@@ -37,6 +46,8 @@ class Settings:
     dashboard_host: str
     dashboard_port: int
     manual_review_url: str
+    web_search_provider: str
+    searxng_base_url: str
 
     @classmethod
     def load(cls, root: Path | None = None) -> "Settings":
@@ -55,6 +66,8 @@ class Settings:
             dashboard_host=os.getenv("JOB_AGENT_DASHBOARD_HOST", "127.0.0.1"),
             dashboard_port=int(os.getenv("JOB_AGENT_DASHBOARD_PORT", "7860")),
             manual_review_url=os.getenv("JOB_AGENT_MANUAL_REVIEW_URL", ""),
+            web_search_provider=(os.getenv("JOB_AGENT_WEB_SEARCH_PROVIDER") or "searxng").strip().lower(),
+            searxng_base_url=(os.getenv("JOB_AGENT_SEARXNG_URL") or "http://127.0.0.1:8080").rstrip("/"),
         )
         settings.validate()
         return settings
@@ -89,6 +102,11 @@ class Settings:
             raise ConfigurationError("OLLAMA_BASE_URL must be loopback-only.")
         if self.dashboard_host.lower() not in LOCAL_HOSTS:
             raise ConfigurationError("Dashboard host must be loopback-only.")
+        if self.web_search_provider not in {"disabled", "searxng"}:
+            raise ConfigurationError("JOB_AGENT_WEB_SEARCH_PROVIDER must be disabled or searxng.")
+        search_host = (urlparse(self.searxng_base_url).hostname or "").lower()
+        if self.web_search_provider == "searxng" and search_host not in LOCAL_HOSTS:
+            raise ConfigurationError("JOB_AGENT_SEARXNG_URL must be loopback-only.")
         if not self.allowed_hosts:
             raise ConfigurationError("At least one allowed read-only job host is required.")
 

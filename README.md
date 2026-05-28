@@ -198,8 +198,36 @@ URLs to:
 data/profiles/watchlist.json
 ```
 
-The default watchlist keeps `queries_enabled` off because Google/DuckDuckGo served
-anti-automation interstitials from this host during testing.
+The default watchlist keeps raw Google/DuckDuckGo browser scraping off because
+search engines served anti-automation interstitials from this host during
+testing.
+
+## Local Web Search
+
+For actual web search without exposing a public service, run the bundled local
+SearXNG broker. It binds only to `127.0.0.1:8099`; the Python app then calls the
+local JSON endpoint and opens only allowlisted job/ATS result hosts.
+
+```bash
+scripts/start_local_search.sh
+.venv/bin/python -m app.main web-search "AI product engineer Switzerland sponsorship" --max-results 10
+.venv/bin/python -m app.main search-jobs --query "AI product engineer" --location "Switzerland sponsorship" --max-results 10
+```
+
+Stop it with:
+
+```bash
+scripts/stop_local_search.sh
+```
+
+Security notes:
+
+- SearXNG is published only on `127.0.0.1`, not `0.0.0.0`.
+- Its config lives in ignored private data under `data/search/searxng/`.
+- The container runs with `no-new-privileges`, dropped capabilities, read-only
+  filesystem, and a small tmpfs.
+- Do not change `JOB_AGENT_SEARXNG_URL` to a public host; the app rejects
+  non-loopback search URLs.
 
 ## Private Autopilot
 

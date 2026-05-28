@@ -25,6 +25,7 @@ from .watchlist import write_default_watchlist
 from .webabi.recorder import AuditRecorder
 from .webabi.replay import summarize_log
 from .webabi.schema import ActionRecord
+from .web_search import build_job_search_terms, search_web
 from .whatsapp_notifier import WhatsAppConfigurationError, send_whatsapp_message, write_default_whatsapp
 from .worker import run_forever, run_once
 
@@ -77,6 +78,10 @@ def build_parser() -> argparse.ArgumentParser:
     worker.add_argument("--interval-minutes", type=int)
     llm = sub.add_parser("llm-status", help="Report local Ollama/model status")
     llm.add_argument("--test", action="store_true", help="Run a one-prompt model API test")
+    web_search = sub.add_parser("web-search", help="Query the local-only SearXNG web-search provider")
+    web_search.add_argument("query")
+    web_search.add_argument("--location", default="", help="Optional job location terms")
+    web_search.add_argument("--max-results", type=int, default=10)
     search = sub.add_parser("search-jobs", help="Read public ATS search results and rank them")
     search.add_argument("--query", required=True)
     search.add_argument("--location", required=True)
@@ -149,6 +154,16 @@ async def _run_async(args: argparse.Namespace, settings: Settings) -> int:
         for candidate in observed.candidates:
             print(f"- {candidate.action_type}: {candidate.label}")
         print(f"Audit log: {recorder.path}")
+        return 0
+    if args.command == "web-search":
+        terms = build_job_search_terms(args.query, args.location) if args.location else args.query
+        results = await search_web(settings, terms, max_results=args.max_results)
+        print(f"Provider: {settings.web_search_provider} ({settings.searxng_base_url})")
+        print(f"Results: {len(results)}")
+        for result in results:
+            allowed = "allowed" if settings.is_allowed_url(result.url) else "not-allowed-for-browser-read"
+            print(f"- {result.title} [{allowed}]")
+            print(f"  {result.url}")
         return 0
     if args.command == "search-jobs":
         jobs = await search_and_rank_jobs(
@@ -227,7 +242,7 @@ async def _run_async(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def run(args: argparse.Namespace, settings: Settings) -> int:
-    if args.command in {"login-session", "gmail-check", "page-context", "smoke-test", "search-jobs", "worker-once", "worker"} or (
+    if args.command in {"login-session", "gmail-check", "page-context", "smoke-test", "web-search", "search-jobs", "worker-once", "worker"} or (
         args.command == "apply" and (args.confirm or args.auto_submit)
     ) or (
         args.command == "apply" and args.prepare

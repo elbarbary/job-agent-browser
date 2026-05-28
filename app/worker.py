@@ -112,6 +112,10 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
             except Exception as exc:
                 errors.append(f"{query}: {exc}")
                 LOGGER.exception("query failed: %s", query)
+                if "anti-bot challenge" in str(exc):
+                    errors.append("public search queries paused for this run after search-engine anti-bot challenge")
+                    LOGGER.warning("public search queries paused for this run after anti-bot challenge")
+                    break
     else:
         LOGGER.info("public search queries are disabled; processing source_urls only")
 

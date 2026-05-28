@@ -853,6 +853,20 @@ class BrowserEngine:
             page = await browser.new_page()
             await page.goto(search_url)
             await asyncio.sleep(0.75)
+            body_text = str(
+                _decoded_json(await page.evaluate("() => (document.body && document.body.innerText || '').slice(0, 4000)"))
+            )
+            page_html = str(
+                _decoded_json(await page.evaluate("() => document.documentElement.outerHTML.slice(0, 20000)"))
+            )
+            if "anomaly.js" in page_html or "cc=botnet" in page_html or "duckduckgo.com/anomaly" in page_html:
+                raise BrowserSafetyError(
+                    "DuckDuckGo returned an anti-bot challenge instead of search results. "
+                    "Public search queries cannot discover jobs from this host right now; "
+                    "feed/API sources and approved source URLs will still run."
+                )
+            if "no results" in body_text.casefold():
+                return []
             links = _decoded_json(await page.evaluate(
                 """() => Array.from(document.querySelectorAll('a[href]')).map(a => ({
                     label: (a.innerText || '').trim().slice(0, 200),
