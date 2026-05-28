@@ -23,6 +23,20 @@ def build_search_url(query: str, location: str) -> str:
     return f"https://html.duckduckgo.com/html/?q={quote_plus(terms)}"
 
 
+def merge_ranked_jobs(existing: list[dict[str, object]], discovered: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Merge new discovery without deleting prior local job records."""
+    by_url: dict[str, dict[str, object]] = {
+        str(job.get("url")): job for job in existing if job.get("url")
+    }
+    for job in discovered:
+        url = str(job.get("url") or "")
+        if url:
+            by_url[url] = job
+    merged = list(by_url.values())
+    merged.sort(key=lambda item: int(item.get("match_score", 0)), reverse=True)
+    return merged
+
+
 async def search_and_rank_jobs(
     settings: Settings,
     recorder: AuditRecorder,
@@ -61,5 +75,6 @@ async def search_and_rank_jobs(
         )
         jobs.append(ranked.to_dict())
     jobs.sort(key=lambda item: int(item["match_score"]), reverse=True)
-    ApplicationRepository(settings).save_jobs(jobs)
+    repository = ApplicationRepository(settings)
+    repository.save_jobs(merge_ranked_jobs(repository.load_jobs(), jobs))
     return jobs
