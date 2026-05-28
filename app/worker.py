@@ -22,6 +22,7 @@ from .telegram_notifier import TelegramConfigurationError, load_telegram_config,
 from .tracker import format_tracker_chat, tracker_status
 from .watchlist import load_watchlist
 from .webabi.recorder import AuditRecorder
+from .whatsapp_notifier import WhatsAppConfigurationError, load_whatsapp_config, send_whatsapp_message, whatsapp_ready
 
 
 LOGGER = logging.getLogger("job_agent_worker")
@@ -224,14 +225,26 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
     status_path.write_text(json.dumps(status, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
     status_path.chmod(0o600)
     telegram_config = load_telegram_config(settings)
+    tracker_message = ""
     if telegram_ready(telegram_config) and telegram_config.get("notify_on_worker_run"):
         try:
-            send_telegram_message(settings, format_tracker_chat(tracker_status(settings)))
+            tracker_message = tracker_message or format_tracker_chat(tracker_status(settings))
+            send_telegram_message(settings, tracker_message)
         except (TelegramConfigurationError, Exception) as exc:
             errors.append(f"Telegram notification failed: {exc}")
             status["errors"] = errors
             status_path.write_text(json.dumps(status, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
             LOGGER.exception("telegram notification failed")
+    whatsapp_config = load_whatsapp_config(settings)
+    if whatsapp_ready(whatsapp_config) and whatsapp_config.get("notify_on_worker_run"):
+        try:
+            tracker_message = tracker_message or format_tracker_chat(tracker_status(settings))
+            send_whatsapp_message(settings, tracker_message)
+        except (WhatsAppConfigurationError, Exception) as exc:
+            errors.append(f"WhatsApp notification failed: {exc}")
+            status["errors"] = errors
+            status_path.write_text(json.dumps(status, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+            LOGGER.exception("whatsapp notification failed")
     LOGGER.info("worker run complete: %s", status)
     return status
 

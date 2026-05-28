@@ -25,6 +25,7 @@ from .watchlist import write_default_watchlist
 from .webabi.recorder import AuditRecorder
 from .webabi.replay import summarize_log
 from .webabi.schema import ActionRecord
+from .whatsapp_notifier import WhatsAppConfigurationError, send_whatsapp_message, write_default_whatsapp
 from .worker import run_forever, run_once
 
 
@@ -60,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init-watchlist", help="Write the private background worker watchlist")
     sub.add_parser("init-autopilot", help="Write the private opt-in autopilot submission template")
     sub.add_parser("init-telegram", help="Write the private optional Telegram notification template")
+    sub.add_parser("init-whatsapp", help="Write the private optional WhatsApp notification template")
     status = sub.add_parser("status", help="Show jobs, drafts, submissions, and worker state")
     status.add_argument("--json", action="store_true", help="Print machine-readable tracker JSON")
     status.add_argument("--write-html", action="store_true", help="Write data/applications/tracker.html")
@@ -68,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--port", type=int, default=None)
     notify = sub.add_parser("notify-status", help="Send current tracker status to a configured notifier")
     notify.add_argument("--telegram", action="store_true", help="Send through private Telegram bot config")
+    notify.add_argument("--whatsapp", action="store_true", help="Send through private WhatsApp Cloud API config")
     worker_once = sub.add_parser("worker-once", help="Run one safe background worker cycle")
     worker_once.add_argument("--no-llm", action="store_true", help="Disable LLM advisory for this run")
     worker = sub.add_parser("worker", help="Run the safe background worker forever")
@@ -266,6 +269,10 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
         path = write_default_telegram(settings)
         print(f"Telegram template saved: {path}")
         return 0
+    if args.command == "init-whatsapp":
+        path = write_default_whatsapp(settings)
+        print(f"WhatsApp template saved: {path}")
+        return 0
     if args.command == "status":
         status = tracker_status(settings)
         if args.write_html:
@@ -279,10 +286,17 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
         serve_tracker(settings, args.host, args.port)
         return 0
     if args.command == "notify-status":
-        if not args.telegram:
-            raise TelegramConfigurationError("Choose a notifier, for example --telegram.")
-        send_telegram_message(settings, format_tracker_chat(tracker_status(settings)))
-        print("Telegram status sent.")
+        if not args.telegram and not args.whatsapp:
+            raise TelegramConfigurationError("Choose a notifier, for example --telegram or --whatsapp.")
+        message = format_tracker_chat(tracker_status(settings))
+        sent: list[str] = []
+        if args.telegram:
+            send_telegram_message(settings, message)
+            sent.append("Telegram")
+        if args.whatsapp:
+            send_whatsapp_message(settings, message)
+            sent.append("WhatsApp")
+        print(f"{' and '.join(sent)} status sent.")
         return 0
     if args.command == "review-jobs":
         _review_jobs(settings)
@@ -332,6 +346,7 @@ def main() -> int:
         PolicyViolation,
         EmailConfigurationError,
         TelegramConfigurationError,
+        WhatsAppConfigurationError,
     ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2

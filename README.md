@@ -436,10 +436,54 @@ The notification includes counts for jobs, drafts, submissions, recent submitted
 roles, pending drafts, and worker errors. It does not send CVs, cookies, browser
 sessions, raw logs, or application files.
 
-WhatsApp is possible, but it is not a lightweight personal connector: it usually
-requires WhatsApp Business Platform setup, a Meta app, a phone number, webhook
-configuration, and template/message approval. Start with Telegram unless there is a
-specific reason to use WhatsApp.
+## WhatsApp Notifications
+
+WhatsApp support is outbound-only through the official Meta WhatsApp Cloud API.
+The app does not create a public webhook, so WhatsApp cannot control the worker by
+replying to messages. This keeps the system local/private while still letting it
+send tracker updates to your phone.
+
+Initialize the private config:
+
+```bash
+.venv/bin/python -m app.main init-whatsapp
+chmod 600 data/profiles/whatsapp.json
+```
+
+In Meta's WhatsApp API setup, get:
+
+- a WhatsApp Cloud API access token;
+- the business phone number ID;
+- your recipient phone number in international format.
+
+Then edit `data/profiles/whatsapp.json`:
+
+```json
+{
+  "enabled": true,
+  "access_token": "paste_meta_access_token_here",
+  "phone_number_id": "paste_phone_number_id_here",
+  "recipient_phone": "+201001234567",
+  "graph_api_version": "v25.0",
+  "notify_on_worker_run": true,
+  "send_mode": "text"
+}
+```
+
+Text messages may require you to message the WhatsApp Business number first,
+opening Meta's customer-service window. If you want first-contact notifications,
+set `send_mode` to `template` and configure an approved template such as
+`hello_world` for testing.
+
+Send a test status update:
+
+```bash
+.venv/bin/python -m app.main notify-status --whatsapp
+```
+
+You can also set `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`,
+`WHATSAPP_RECIPIENT_PHONE`, `WHATSAPP_ENABLED=true`, and
+`WHATSAPP_NOTIFY_ON_WORKER_RUN=true` in `.env`, but do not commit `.env`.
 
 ## Daily Update And Optional Email
 
