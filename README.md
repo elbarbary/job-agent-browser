@@ -307,10 +307,22 @@ the tracker records an `unverified_submit_click` instead of a submission.
 Autopilot will not retry jobs that already have an unverified submit-click record;
 review those manually before clearing or archiving the attempt.
 
-### Site-Specific Adapters
+### Universal Page Planner And Site Adapters
 
-The generic form engine is deliberately conservative. Some sites need a stronger
-adapter because they submit through JavaScript and show errors without navigating.
+Autopilot now has two layers:
+
+- a universal browser-planner fallback that opens safe "Apply" entry points,
+  extracts rendered fields/buttons/options, asks the local LLM to map those fields
+  to allowed CV/profile answer keys, validates that every required answer is known,
+  and then fills/submits only if the page passes those checks;
+- site-specific adapters for sites that need special handling because they submit
+  through JavaScript and show errors without navigating.
+
+The local LLM planner is not allowed to invent values. It can only select from
+known answer keys such as `email`, `phone`, `location`, `linkedin`, `github`,
+`resume_file`, or `application_terms_checkbox`. Required unknown questions still
+block the submit attempt and are logged as needing user input.
+
 The Arbeitnow adapter handles its built-in application form directly:
 
 - fills first name, last name, email, and CV upload from known profile/config data;
@@ -487,6 +499,8 @@ about meaning on top of the same page a human would see.
 
 ## Current Scope
 
-This MVP omits a web dashboard. Autopilot uses conservative generic form handling;
-site-specific adapters can be added later for higher completion rates without
-weakening the audit and fact-source gates.
+This MVP omits a web dashboard. Autopilot uses a conservative universal form
+planner plus site-specific adapters. Some multi-step portals, CAPTCHA/login walls,
+or custom assessments may still require a new adapter or manual review, but the
+default path now gives the AI a rendered browser context instead of relying only on
+hard-coded selectors.

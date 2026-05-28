@@ -19,6 +19,7 @@ from browser_use import Browser  # noqa: E402  (telemetry opt-out precedes impor
 
 from .autopilot import host_allowed, is_known
 from .config import Settings
+from .llm_client import LocalLLMClient, LocalLLMError
 from .policy import RiskClass, assert_action_allowed
 from .webabi.recorder import AuditRecorder
 from .webabi.schema import ActionCandidate, ActionRecord
@@ -334,20 +335,43 @@ class BrowserEngine:
                     answers,
                     autopilot_config,
                 )
+            await _open_application_form(page, int(autopilot_config.get("application_navigation_max_steps", 3)))
             snapshot = _decoded_json(await page.evaluate(AUTOPILOT_SNAPSHOT_SCRIPT))
             page_url = str(await page.get_url())
             page_title = str(snapshot.get("title") or job_id)
-            fields = list(snapshot.get("fields") or [])
+            all_fields = list(snapshot.get("fields") or [])
+            fields = all_fields
             buttons = list(snapshot.get("buttons") or [])
             submit_button = _choose_submit_button(buttons)
             submit_index = int(submit_button["index"]) if submit_button else None
             if submit_button and int(submit_button.get("form_index", -1)) >= 0:
                 fields = [
                     field
-                    for field in fields
+                    for field in all_fields
                     if int(field.get("form_index", -1)) == int(submit_button["form_index"])
                 ]
             fills, errors = _plan_form_fills(fields, answers, autopilot_config)
+            if autopilot_config.get("use_llm_form_planner", True):
+                llm_fills, llm_submit_index, llm_notes = _plan_form_with_local_llm(
+                    self.settings,
+                    snapshot,
+                    answers,
+                    autopilot_config,
+                )
+                fills = _merge_fills(fills, llm_fills)
+                if llm_submit_index is not None:
+                    submit_index = llm_submit_index
+                    llm_button = _button_by_index(buttons, llm_submit_index)
+                    if llm_button and int(llm_button.get("form_index", -1)) >= 0:
+                        fields = [
+                            field
+                            for field in all_fields
+                            if int(field.get("form_index", -1)) == int(llm_button["form_index"])
+                        ]
+                        allowed_field_indexes = {int(field.get("index", -1)) for field in fields}
+                        fills = [fill for fill in fills if int(fill.get("index", -1)) in allowed_field_indexes]
+                errors = _validate_required_fields(fields, fills, autopilot_config)
+                errors.extend(llm_notes)
             if not fields:
                 errors.append("No application form fields were found on this page.")
             elif not fills:
@@ -875,6 +899,17 @@ AUTOPILOT_SNAPSHOT_SCRIPT = """() => {
         parts.push(el.id || '');
         return parts.join(' ').replace(/\\s+/g, ' ').trim();
     };
+    const selectorFor = (el) => {
+        if (!el || !el.tagName) return null;
+        if (el.id) return '#' + CSS.escape(el.id);
+        const attr = ['data-testid', 'data-test', 'aria-label', 'name'].find(name => el.getAttribute(name));
+        if (attr) return `${el.tagName.toLowerCase()}[${attr}="${CSS.escape(el.getAttribute(attr))}"]`;
+        const parent = el.parentElement;
+        if (!parent) return el.tagName.toLowerCase();
+        const siblings = Array.from(parent.children).filter(child => child.tagName === el.tagName);
+        if (siblings.length === 1) return el.tagName.toLowerCase();
+        return `${el.tagName.toLowerCase()}:nth-of-type(${siblings.indexOf(el) + 1})`;
+    };
     const forms = Array.from(document.querySelectorAll('form'));
     const formIndexFor = (el) => forms.indexOf(el.closest('form'));
     const fieldElements = Array.from(document.querySelectorAll('input, textarea, select'))
@@ -883,23 +918,126 @@ AUTOPILOT_SNAPSHOT_SCRIPT = """() => {
     fieldElements.forEach((el, index) => el.setAttribute('data-autopilot-field-index', String(index)));
     const fields = fieldElements.map((el, index) => ({
             index,
+            selector: selectorFor(el),
             tag: el.tagName.toLowerCase(),
             type: (el.type || '').toLowerCase(),
             name: el.name || '',
             id: el.id || '',
             label: textFor(el).slice(0, 240),
             required: Boolean(el.required || el.getAttribute('aria-required') === 'true'),
-            form_index: formIndexFor(el)
+            autocomplete: el.getAttribute('autocomplete') || '',
+            form_index: formIndexFor(el),
+            options: el.tagName.toLowerCase() === 'select'
+                ? Array.from(el.options || []).slice(0, 80).map(option => ({
+                    text: (option.innerText || option.value || '').replace(/\\s+/g, ' ').trim().slice(0, 160),
+                    value: option.value || ''
+                }))
+                : []
         }));
     const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"]'))
         .filter(el => visible(el) && !el.disabled)
         .map((el, index) => ({
             index,
+            selector: selectorFor(el),
+            tag: el.tagName.toLowerCase(),
+            type: (el.type || '').toLowerCase(),
             form_index: formIndexFor(el),
             text: ((el.innerText || el.value || el.getAttribute('aria-label') || '') + '').replace(/\\s+/g, ' ').trim().slice(0, 160)
         }));
     return {title: document.title || '', url: location.href, fields, buttons};
 }"""
+
+
+APPLICATION_NAVIGATION_SCRIPT = """() => {
+    const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const selectorFor = (el) => {
+        if (!el || !el.tagName) return null;
+        if (el.id) return '#' + CSS.escape(el.id);
+        const attr = ['data-testid', 'data-test', 'aria-label', 'name'].find(name => el.getAttribute(name));
+        if (attr) return `${el.tagName.toLowerCase()}[${attr}="${CSS.escape(el.getAttribute(attr))}"]`;
+        const parent = el.parentElement;
+        if (!parent) return el.tagName.toLowerCase();
+        const siblings = Array.from(parent.children).filter(child => child.tagName === el.tagName);
+        if (siblings.length === 1) return el.tagName.toLowerCase();
+        return `${el.tagName.toLowerCase()}:nth-of-type(${siblings.indexOf(el) + 1})`;
+    };
+    const clean = (value, limit = 160) => String(value || '').replace(/\\s+/g, ' ').trim().slice(0, limit);
+    const fields = Array.from(document.querySelectorAll('input, textarea, select'))
+        .filter(el => visible(el) && !el.disabled)
+        .filter(el => !['hidden', 'submit', 'button', 'reset', 'image'].includes((el.type || '').toLowerCase()));
+    const actions = Array.from(document.querySelectorAll('a[href], button, input[type="submit"], input[type="button"], [role="button"]'))
+        .filter(el => visible(el) && !el.disabled)
+        .map((el, index) => ({
+            index,
+            selector: selectorFor(el),
+            tag: el.tagName.toLowerCase(),
+            type: (el.type || '').toLowerCase(),
+            text: clean(el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || ''),
+            href: el.href || ''
+        }));
+    return {url: location.href, title: document.title || '', field_count: fields.length, actions};
+}"""
+
+
+async def _open_application_form(page: Any, max_steps: int) -> None:
+    for _ in range(max(0, max_steps)):
+        snapshot = _decoded_json(await page.evaluate(APPLICATION_NAVIGATION_SCRIPT))
+        if not isinstance(snapshot, dict):
+            return
+        if int(snapshot.get("field_count") or 0) > 0:
+            return
+        action = _choose_application_entry_action(list(snapshot.get("actions") or []))
+        if action is None:
+            return
+        await page.evaluate(_click_application_entry_script(int(action["index"])))
+        await asyncio.sleep(1.25)
+
+
+def _choose_application_entry_action(actions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    blocked = ("submit", "send application", "delete", "withdraw", "remove", "pay", "purchase", "checkout")
+    wanted = (
+        "apply now",
+        "apply for this job",
+        "apply for this position",
+        "start application",
+        "continue application",
+        "apply",
+    )
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    for action in actions:
+        text = str(action.get("text") or "").casefold()
+        href = str(action.get("href") or "").casefold()
+        haystack = f"{text} {href}"
+        if any(word in haystack for word in blocked):
+            continue
+        for priority, marker in enumerate(wanted):
+            if marker in haystack:
+                candidates.append((priority, action))
+                break
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def _click_application_entry_script(index: int) -> str:
+    return f"""() => {{
+        const visible = (el) => {{
+            const r = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        }};
+        const actions = Array.from(document.querySelectorAll('a[href], button, input[type="submit"], input[type="button"], [role="button"]'))
+            .filter(el => visible(el) && !el.disabled);
+        const action = actions[{index}];
+        if (!action) throw new Error('application entry action disappeared before click');
+        action.click();
+        return true;
+    }}"""
 
 
 def _field_text(field: dict[str, Any]) -> str:
@@ -956,6 +1094,234 @@ def _answer_for_field(field: dict[str, Any], answers: dict[str, Any]) -> str | N
     return None
 
 
+def _known_answer_values(answers: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    first_name, last_name = _split_name(answers.get("name"))
+    links = [str(link) for link in answers.get("links") or []]
+    values: dict[str, Any] = {
+        "first_name": first_name,
+        "last_name": last_name,
+        "name": answers.get("name"),
+        "email": answers.get("email"),
+        "phone": answers.get("phone"),
+        "location": answers.get("location"),
+        "linkedin": _link_for(answers, "linkedin"),
+        "github": _link_for(answers, "github"),
+        "portfolio": links[0] if links else None,
+        "website": links[0] if links else None,
+        "work_authorization": answers.get("work_authorization"),
+        "availability": answers.get("availability"),
+        "salary_expectation": answers.get("salary_expectation"),
+    }
+    resume_path = Path(str(config.get("resume_path") or "")).expanduser()
+    if not config.get("block_file_uploads", True) and resume_path.exists():
+        values["resume_file"] = str(resume_path.resolve())
+    if config.get("allow_application_terms_checkbox") is True:
+        values["application_terms_checkbox"] = True
+    return {key: value for key, value in values.items() if is_known(value)}
+
+
+def _plan_form_with_local_llm(
+    settings: Settings,
+    snapshot: dict[str, Any],
+    answers: dict[str, Any],
+    config: dict[str, Any],
+) -> tuple[list[dict[str, Any]], int | None, list[str]]:
+    try:
+        llm = LocalLLMClient(settings, timeout=float(config.get("llm_form_planner_timeout_seconds", 120)))
+        raw_plan = llm.chat(_form_planner_prompt(snapshot, answers, config))
+        plan = _extract_json_object(raw_plan)
+    except (LocalLLMError, ValueError, TypeError, json.JSONDecodeError):
+        return [], None, []
+    if not isinstance(plan, dict):
+        return [], None, []
+
+    fields = list(snapshot.get("fields") or [])
+    buttons = list(snapshot.get("buttons") or [])
+    known_values = _known_answer_values(answers, config)
+    fills: list[dict[str, Any]] = []
+    for item in plan.get("fills") or []:
+        if not isinstance(item, dict):
+            continue
+        fill = _planner_fill(item, fields, known_values, config)
+        if fill:
+            fills.append(fill)
+
+    submit_index = None
+    requested_submit = plan.get("submit_button_index")
+    if isinstance(requested_submit, int) and _safe_submit_button_index(buttons, requested_submit):
+        submit_index = requested_submit
+    return fills, submit_index, []
+
+
+def _form_planner_prompt(
+    snapshot: dict[str, Any],
+    answers: dict[str, Any],
+    config: dict[str, Any],
+) -> str:
+    fields = list(snapshot.get("fields") or [])[:80]
+    buttons = list(snapshot.get("buttons") or [])[:40]
+    known_values = _known_answer_values(answers, config)
+    safe_keys = sorted(known_values)
+    compact_fields = [
+        {
+            "index": field.get("index"),
+            "tag": field.get("tag"),
+            "type": field.get("type"),
+            "label": field.get("label"),
+            "name": field.get("name"),
+            "id": field.get("id"),
+            "required": field.get("required"),
+            "options": field.get("options"),
+        }
+        for field in fields
+    ]
+    compact_buttons = [
+        {
+            "index": button.get("index"),
+            "text": button.get("text"),
+            "type": button.get("type"),
+            "form_index": button.get("form_index"),
+        }
+        for button in buttons
+    ]
+    return (
+        "You map a browser job-application form to known candidate answer keys. "
+        "Return JSON only. Do not invent candidate facts. If a field asks for something "
+        "not represented by an allowed answer key, omit it; the caller will block required "
+        "unknown fields. Use only these answer_key values: "
+        f"{json.dumps(safe_keys, ensure_ascii=True)}. "
+        "For a resume upload use answer_key resume_file. For ordinary application terms "
+        "or privacy consent checkboxes use application_terms_checkbox only when present in "
+        "the allowed keys. Choose submit_button_index only for a final Apply/Submit/Send "
+        "application button, never for delete, payment, withdraw, or account actions.\n\n"
+        "Output schema: "
+        "{\"fills\":[{\"field_index\":0,\"answer_key\":\"email\"}],"
+        "\"submit_button_index\":1,\"notes\":[]}.\n\n"
+        f"PAGE_TITLE: {json.dumps(snapshot.get('title', ''), ensure_ascii=True)}\n"
+        f"FIELDS: {json.dumps(compact_fields, ensure_ascii=True)}\n"
+        f"BUTTONS: {json.dumps(compact_buttons, ensure_ascii=True)}"
+    )
+
+
+def _extract_json_object(text: str) -> Any:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.strip("`")
+        stripped = stripped.removeprefix("json").strip()
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("No JSON object found in local LLM output.")
+    return json.loads(stripped[start : end + 1])
+
+
+def _planner_fill(
+    item: dict[str, Any],
+    fields: list[dict[str, Any]],
+    known_values: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any] | None:
+    field_index = item.get("field_index")
+    answer_key = str(item.get("answer_key") or "")
+    if not isinstance(field_index, int) or answer_key not in known_values:
+        return None
+    field = next((candidate for candidate in fields if int(candidate.get("index", -1)) == field_index), None)
+    if not field:
+        return None
+    label = str(field.get("label") or field.get("name") or field.get("id") or f"field {field_index}")
+    field_type = str(field.get("type", "")).casefold()
+    tag = str(field.get("tag", "")).casefold()
+    value = known_values[answer_key]
+    if answer_key == "resume_file":
+        if field_type != "file":
+            return None
+        return {"index": field_index, "label": label, "value": str(value), "kind": "file"}
+    if answer_key == "application_terms_checkbox":
+        if field_type not in {"checkbox", "radio"} or not _is_application_terms_field(field):
+            return None
+        return {"index": field_index, "label": label, "value": True, "kind": "checkbox"}
+    if field_type in {"checkbox", "radio", "file"}:
+        return None
+    if tag == "select":
+        option = _matching_select_option(field, str(value))
+        if option is None:
+            return None
+        return {"index": field_index, "label": label, "value": option, "kind": "select"}
+    return {"index": field_index, "label": label, "value": str(value), "kind": "text"}
+
+
+def _matching_select_option(field: dict[str, Any], value: str) -> str | None:
+    normalized = value.casefold().strip()
+    for option in field.get("options") or []:
+        if not isinstance(option, dict):
+            continue
+        text = str(option.get("text") or "")
+        raw_value = str(option.get("value") or text)
+        if normalized and (normalized == text.casefold().strip() or normalized == raw_value.casefold().strip()):
+            return raw_value
+    return None
+
+
+def _is_application_terms_field(field: dict[str, Any]) -> bool:
+    text = _field_text(field)
+    return any(word in text for word in ("terms", "privacy", "gdpr", "data protection", "data processing", "consent"))
+
+
+def _merge_fills(primary: list[dict[str, Any]], secondary: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[int, dict[str, Any]] = {}
+    for fill in secondary:
+        if "index" in fill:
+            merged[int(fill["index"])] = fill
+    for fill in primary:
+        if "index" in fill:
+            merged[int(fill["index"])] = fill
+    return list(merged.values())
+
+
+def _validate_required_fields(
+    fields: list[dict[str, Any]],
+    fills: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> list[str]:
+    filled = {int(fill["index"]) for fill in fills if "index" in fill}
+    errors: list[str] = []
+    for field in fields:
+        if not bool(field.get("required")):
+            continue
+        index = int(field.get("index", -1))
+        if index in filled:
+            continue
+        label = str(field.get("label") or field.get("name") or field.get("id") or f"field {index}")
+        field_type = str(field.get("type", "")).casefold()
+        tag = str(field.get("tag", "")).casefold()
+        if field_type == "file":
+            errors.append(f"Required file upload field has no safe file: {label}")
+        elif field_type in {"checkbox", "radio"}:
+            if _is_application_terms_field(field) and config.get("allow_application_terms_checkbox") is True:
+                errors.append(f"Application terms checkbox was not safely mapped: {label}")
+            else:
+                errors.append(f"Required checkbox/radio needs manual review: {label}")
+        elif tag == "select":
+            errors.append(f"Required select field needs manual review: {label}")
+        elif config.get("block_unknown_required_fields", True):
+            errors.append(f"Required field has no known answer: {label}")
+    return errors
+
+
+def _safe_submit_button_index(buttons: list[dict[str, Any]], index: int) -> bool:
+    button = _button_by_index(buttons, index)
+    if not button:
+        return False
+    text = str(button.get("text") or "").casefold()
+    if any(word in text for word in ("delete", "withdraw", "remove", "pay", "purchase", "checkout")):
+        return False
+    return any(marker in text for marker in ("submit", "apply", "send application", "send"))
+
+
+def _button_by_index(buttons: list[dict[str, Any]], index: int) -> dict[str, Any] | None:
+    return next((candidate for candidate in buttons if int(candidate.get("index", -1)) == index), None)
+
+
 def _plan_form_fills(
     fields: list[dict[str, Any]],
     answers: dict[str, Any],
@@ -982,11 +1348,20 @@ def _plan_form_fills(
                     }
                 )
             continue
-        if field_type in {"checkbox", "radio"} and required and config.get("block_required_checkboxes", True):
-            errors.append(f"Required checkbox/radio blocked: {label}")
+        if field_type in {"checkbox", "radio"}:
+            if _is_application_terms_field(field) and config.get("allow_application_terms_checkbox") is True:
+                fills.append({"index": int(field["index"]), "label": label, "value": True, "kind": "checkbox"})
+                continue
+            if required and config.get("block_required_checkboxes", True):
+                errors.append(f"Required checkbox/radio blocked: {label}")
             continue
-        if tag == "select" and required:
-            errors.append(f"Required select field needs manual review: {label}")
+        if tag == "select":
+            answer = _answer_for_field(field, answers)
+            option = _matching_select_option(field, answer) if answer else None
+            if option:
+                fills.append({"index": int(field["index"]), "label": label, "value": option, "kind": "select"})
+            elif required:
+                errors.append(f"Required select field needs manual review: {label}")
             continue
         answer = _answer_for_field(field, answers)
         if answer:
@@ -1006,8 +1381,10 @@ def _choose_submit_button(buttons: list[dict[str, Any]]) -> dict[str, Any] | Non
         form_index = int(button.get("form_index", -1))
         if "submit" in text:
             priority = 0 if form_index >= 0 else 2
+        elif "send application" in text:
+            priority = 1 if form_index >= 0 else 3
         elif "apply" in text:
-            priority = 1 if form_index >= 0 else 4
+            priority = 2 if form_index >= 0 else 4
         else:
             continue
         candidates.append((priority, button))
@@ -1131,7 +1508,11 @@ def _fill_form_script(fills: list[dict[str, Any]]) -> str:
             const el = fields[fill.index];
             if (!el) continue;
             el.focus();
-            el.value = fill.value;
+            if (fill.kind === 'checkbox') {{
+                el.checked = Boolean(fill.value);
+            }} else {{
+                el.value = fill.value;
+            }}
             el.dispatchEvent(new Event('input', {{bubbles: true}}));
             el.dispatchEvent(new Event('change', {{bubbles: true}}));
         }}
