@@ -50,8 +50,14 @@ class ApplicationRepository:
     def submission_path(self, job_id: str) -> Path:
         return self.settings.applications_dir / "submissions" / f"{job_id}.json"
 
+    def prepared_path(self, job_id: str) -> Path:
+        return self.settings.applications_dir / "prepared" / f"{job_id}.json"
+
     def submission_attempt_path(self, job_id: str) -> Path:
         return self.settings.applications_dir / "submission_attempts" / f"{job_id}.json"
+
+    def has_prepared(self, job_id: str) -> bool:
+        return self.prepared_path(job_id).exists()
 
     def has_submission(self, job_id: str) -> bool:
         return self.submission_path(job_id).exists()
@@ -61,6 +67,9 @@ class ApplicationRepository:
 
     def record_submission(self, job_id: str, payload: dict[str, Any]) -> Path:
         return _write_private_json(self.submission_path(job_id), payload)
+
+    def record_prepared(self, job_id: str, payload: dict[str, Any]) -> Path:
+        return _write_private_json(self.prepared_path(job_id), payload)
 
     def record_submission_attempt(self, job_id: str, payload: dict[str, Any]) -> Path:
         return _write_private_json(self.submission_attempt_path(job_id), payload)
@@ -155,6 +164,18 @@ class ApplicationWorkflow:
             "note": "Autopilot clicked the final submit/apply button after private standing authorization.",
         }
         return self.repository.record_submission(job_id, payload)
+
+    def record_prepared_manual_submit(self, job_id: str, result: dict[str, Any]) -> Path:
+        job_data = self.repository.find_job(job_id)
+        payload = {
+            "job_id": job_id,
+            "job_url": job_data.get("url"),
+            "prepared_at": datetime.now(UTC).isoformat(),
+            "execution": "prepared_manual_submit",
+            "result": result,
+            "note": "The agent filled known fields but did not click final submit. Review in the browser, answer anything missing, then submit manually.",
+        }
+        return self.repository.record_prepared(job_id, payload)
 
     def record_autopilot_attempt(self, job_id: str, result: dict[str, Any]) -> Path:
         job_data = self.repository.find_job(job_id)

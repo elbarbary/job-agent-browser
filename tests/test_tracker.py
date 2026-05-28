@@ -25,6 +25,15 @@ class TrackerTests(unittest.TestCase):
                         "url": "https://jobs.example.test/job-1",
                         "match_score": 91,
                         "risks_uncertainties": ["needs_user_answer: salary"],
+                    },
+                    {
+                        "id": "job-2",
+                        "title": "AI Product Manager",
+                        "company": "Example",
+                        "location": "Remote",
+                        "url": "https://jobs.example.test/job-2",
+                        "match_score": 88,
+                        "risks_uncertainties": [],
                     }
                 ]
             )
@@ -36,18 +45,31 @@ class TrackerTests(unittest.TestCase):
                 json.dumps({"submitted_at": "2026-01-01T00:00:00+00:00"}),
                 encoding="utf-8",
             )
+            (settings.applications_dir / "prepared" / "job-2.json").write_text(
+                json.dumps(
+                    {
+                        "prepared_at": "2026-01-03T00:00:00+00:00",
+                        "result": {"manual_review_url": "https://example.test/review"},
+                    }
+                ),
+                encoding="utf-8",
+            )
             (settings.applications_dir / "submission_attempts" / "job-2.json").write_text(
                 json.dumps({"attempted_at": "2026-01-02T00:00:00+00:00"}),
                 encoding="utf-8",
             )
             status = tracker_status(settings)
-            self.assertEqual(status["counts"]["jobs"], 1)
+            self.assertEqual(status["counts"]["jobs"], 2)
             self.assertEqual(status["counts"]["drafts"], 1)
+            self.assertEqual(status["counts"]["prepared"], 1)
             self.assertEqual(status["counts"]["submitted"], 1)
             self.assertEqual(status["counts"]["unverified_submit_clicks"], 1)
             self.assertEqual(status["jobs"][0]["state"], "submitted")
+            self.assertEqual(status["jobs"][1]["state"], "prepared_manual_submit")
             self.assertIn("Product Engineer", format_tracker_text(status))
+            self.assertIn("Prepared:", format_tracker_chat(status))
             self.assertIn("Submitted:", format_tracker_chat(status))
+            self.assertIn("Review prepared application", render_tracker_html(status))
             self.assertIn("Draft answers", render_tracker_html(status))
             self.assertEqual(write_tracker_html(settings).stat().st_mode & 0o777, 0o600)
 

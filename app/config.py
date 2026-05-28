@@ -36,6 +36,7 @@ class Settings:
     allowed_hosts: tuple[str, ...]
     dashboard_host: str
     dashboard_port: int
+    manual_review_url: str
 
     @classmethod
     def load(cls, root: Path | None = None) -> "Settings":
@@ -53,6 +54,7 @@ class Settings:
             ),
             dashboard_host=os.getenv("JOB_AGENT_DASHBOARD_HOST", "127.0.0.1"),
             dashboard_port=int(os.getenv("JOB_AGENT_DASHBOARD_PORT", "7860")),
+            manual_review_url=os.getenv("JOB_AGENT_MANUAL_REVIEW_URL", ""),
         )
         settings.validate()
         return settings
@@ -104,6 +106,7 @@ class Settings:
             self.applications_dir,
             self.applications_dir / "drafts",
             self.applications_dir / "approvals",
+            self.applications_dir / "prepared",
             self.applications_dir / "submissions",
             self.applications_dir / "submission_attempts",
             self.applications_dir / "gmail_checks",

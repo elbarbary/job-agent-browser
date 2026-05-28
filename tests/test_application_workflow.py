@@ -83,6 +83,14 @@ class ApplicationWorkflowTests(unittest.TestCase):
                 workflow.record_autopilot_submission("abc123", {"submitted": True}).read_text(encoding="utf-8")
             )
             self.assertEqual(submission["execution"], "autopilot_submit_clicked")
+            prepared = json.loads(
+                workflow.record_prepared_manual_submit(
+                    "abc123",
+                    {"prepared": True, "manual_review_url": "https://example.test/review"},
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(prepared["execution"], "prepared_manual_submit")
+            self.assertTrue(workflow.repository.has_prepared("abc123"))
             self.assertTrue(workflow.repository.has_submission("abc123"))
             self.assertFalse(workflow.repository.has_submission_attempt("abc123"))
             audit = recorder.path.read_text(encoding="utf-8")

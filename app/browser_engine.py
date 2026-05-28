@@ -124,6 +124,14 @@ class BrowserEngine:
         path.chmod(0o600)
         return path
 
+    def _save_screenshot_bytes(self, raw: bytes, label: str) -> Path:
+        screenshots = self.settings.log_dir / "screenshots"
+        screenshots.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = screenshots / f"{self.recorder.run_id}-{label}.png"
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        return path
+
     async def smoke_test(self) -> PageObservation:
         return await self.observe_page("https://example.com", allowed_url=False)
 
@@ -449,6 +457,240 @@ class BrowserEngine:
             }
         finally:
             await browser.stop()
+
+    async def prepare_application_for_manual_submit(
+        self,
+        url: str,
+        job_id: str,
+        answers: dict[str, Any],
+        autopilot_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Fill known fields in the visible challenge browser, but never click submit."""
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or not host_allowed(url, autopilot_config):
+            raise BrowserSafetyError("Preparation host is not privately allowlisted.")
+        assert_action_allowed(RiskClass.FORM_FILL)
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as exc:  # pragma: no cover - dependency is installed with Browser Use
+            raise BrowserSafetyError("Playwright is required for prepared manual review sessions.") from exc
+
+        cdp_url = str(autopilot_config.get("challenge_browser_cdp_url") or "http://127.0.0.1:9223")
+        manual_review_url = (
+            str(autopilot_config.get("manual_review_url") or "")
+            or self.settings.manual_review_url
+        )
+        errors: list[str] = []
+        fills: list[dict[str, Any]] = []
+        page_url = url
+        page_title = job_id
+        screenshot_path: Path | None = None
+
+        playwright = await async_playwright().start()
+        try:
+            cdp_browser = await playwright.chromium.connect_over_cdp(cdp_url)
+            context = cdp_browser.contexts[0] if cdp_browser.contexts else await cdp_browser.new_context()
+            page = await context.new_page()
+            await page.goto(url)
+            await page.wait_for_load_state("domcontentloaded", timeout=15000)
+            await page.wait_for_timeout(1000)
+            page_url = page.url
+
+            if _is_arbeitnow_job_page(page_url):
+                result = await self._prepare_arbeitnow_manual_page(
+                    page,
+                    page_url,
+                    job_id,
+                    answers,
+                    autopilot_config,
+                    manual_review_url,
+                )
+                await playwright.stop()
+                return result
+
+            await _open_application_form(page, int(autopilot_config.get("application_navigation_max_steps", 3)))
+            snapshot = _decoded_json(await page.evaluate(AUTOPILOT_SNAPSHOT_SCRIPT))
+            page_url = page.url
+            page_title = str(snapshot.get("title") or job_id)
+            all_fields = list(snapshot.get("fields") or [])
+            fields = all_fields
+            buttons = list(snapshot.get("buttons") or [])
+            submit_button = _choose_submit_button(buttons)
+            submit_index = int(submit_button["index"]) if submit_button else None
+            if submit_button and int(submit_button.get("form_index", -1)) >= 0:
+                fields = [
+                    field
+                    for field in all_fields
+                    if int(field.get("form_index", -1)) == int(submit_button["form_index"])
+                ]
+            fills, errors = _plan_form_fills(fields, answers, autopilot_config)
+            errors = [
+                error for error in _validate_required_fields(fields, fills, autopilot_config)
+                if "checkbox/radio needs manual review" not in error
+            ]
+            if not fields:
+                errors.append("No application form fields were found on this page.")
+            elif not fills:
+                errors.append("No form fields could be safely filled from known answers.")
+            if submit_index is None:
+                errors.append("No safe submit/apply button was found.")
+            if errors:
+                screenshot_path = self._save_screenshot_bytes(
+                    await page.screenshot(full_page=False),
+                    "prepare-blocked",
+                )
+                self.recorder.record(
+                    ActionRecord(
+                        run_id=self.recorder.run_id,
+                        workflow="prepare_manual_submit",
+                        page_url=page_url,
+                        page_title=page_title,
+                        visible_action_candidates=[],
+                        selected_action="blocked_before_prepare",
+                        risk_classification=RiskClass.FORM_FILL,
+                        input_values={"job_id": job_id, "planned_fills": _audit_fills(fills)},
+                        preconditions=["private challenge browser is running"],
+                        postconditions=["no submit button was clicked"],
+                        screenshot_path=str(screenshot_path),
+                        result="blocked",
+                        errors=errors,
+                    )
+                )
+                await playwright.stop()
+                return {
+                    "prepared": False,
+                    "blocked": True,
+                    "errors": errors,
+                    "fills": _audit_fills(fills),
+                    "screenshot_path": str(screenshot_path),
+                    "manual_review_url": manual_review_url,
+                }
+
+            file_fills = [fill for fill in fills if fill.get("kind") == "file"]
+            text_fills = [fill for fill in fills if fill.get("kind") != "file"]
+            for fill in file_fills:
+                selector = f'[data-autopilot-field-index="{int(fill["index"])}"]'
+                await page.set_input_files(selector, str(fill["value"]))
+            await page.evaluate(_fill_form_script(text_fills))
+            await page.wait_for_timeout(500)
+            screenshot_path = self._save_screenshot_bytes(
+                await page.screenshot(full_page=False),
+                "prepare-manual-submit",
+            )
+            self.recorder.record(
+                ActionRecord(
+                    run_id=self.recorder.run_id,
+                    workflow="prepare_manual_submit",
+                    page_url=page_url,
+                    page_title=page_title,
+                    visible_action_candidates=[],
+                    selected_action="fill_known_fields_stop_before_submit",
+                    risk_classification=RiskClass.FORM_FILL,
+                    input_values={"job_id": job_id, "planned_fills": _audit_fills(fills)},
+                    preconditions=["private challenge browser is running", "submit host was privately allowlisted"],
+                    postconditions=["known fields filled", "final submit was not clicked"],
+                    screenshot_path=str(screenshot_path),
+                    result="prepared_manual_submit",
+                )
+            )
+            await playwright.stop()
+            return {
+                "prepared": True,
+                "blocked": False,
+                "submitted": False,
+                "clicked": False,
+                "errors": [],
+                "post_fill_url": page_url,
+                "screenshot_path": str(screenshot_path),
+                "manual_review_url": manual_review_url,
+                "fills": _audit_fills(fills),
+                "instructions": "Open the manual_review_url, review the still-open browser tab, answer missing questions, then press Submit yourself.",
+            }
+        except Exception as exc:
+            await playwright.stop()
+            raise BrowserSafetyError(
+                f"Could not prepare application in challenge browser. Start it with scripts/start_challenge_browser.sh first. Details: {exc}"
+            ) from exc
+
+    async def _prepare_arbeitnow_manual_page(
+        self,
+        page: Any,
+        url: str,
+        job_id: str,
+        answers: dict[str, Any],
+        autopilot_config: dict[str, Any],
+        manual_review_url: str,
+    ) -> dict[str, Any]:
+        snapshot = _decoded_json(await page.evaluate(ARBEITNOW_SNAPSHOT_SCRIPT))
+        page_title = str(snapshot.get("title") or job_id)
+        errors: list[str] = []
+        fills: list[dict[str, Any]] = []
+        if not snapshot.get("form_present"):
+            errors.append("Arbeitnow application form was not found.")
+        first_name, last_name = _split_name(answers.get("name"))
+        field_values = {
+            "first_name": first_name,
+            "last_name": last_name,
+            "email": str(answers["email"]) if is_known(answers.get("email")) else None,
+        }
+        labels = {"first_name": "First name", "last_name": "Last name", "email": "Email address"}
+        for name, value in field_values.items():
+            if value:
+                fills.append({"selector": f"#{name}", "label": labels[name], "value": value, "kind": "text"})
+            else:
+                errors.append(f"Arbeitnow required field has no known answer: {labels[name]}")
+        resume_path = Path(str(autopilot_config.get("resume_path") or "")).expanduser()
+        if autopilot_config.get("block_file_uploads", True) or not resume_path.exists():
+            errors.append("Arbeitnow CV/resume upload is blocked or resume_path does not exist.")
+        else:
+            fills.append({"selector": "#cv_or_resume", "label": "CV / Resume", "value": str(resume_path.resolve()), "kind": "file"})
+        if errors:
+            screenshot_path = self._save_screenshot_bytes(await page.screenshot(full_page=False), "prepare-arbeitnow-blocked")
+            return {
+                "adapter": "arbeitnow",
+                "prepared": False,
+                "blocked": True,
+                "errors": errors,
+                "fills": _audit_fills(fills),
+                "screenshot_path": str(screenshot_path),
+                "manual_review_url": manual_review_url,
+            }
+        text_fills = {fill["selector"]: fill["value"] for fill in fills if fill.get("kind") == "text"}
+        await page.evaluate(_arbeitnow_fill_script(text_fills))
+        for fill in fills:
+            if fill.get("kind") == "file":
+                await page.set_input_files(str(fill["selector"]), str(fill["value"]))
+        await page.wait_for_timeout(500)
+        screenshot_path = self._save_screenshot_bytes(await page.screenshot(full_page=False), "prepare-arbeitnow")
+        self.recorder.record(
+            ActionRecord(
+                run_id=self.recorder.run_id,
+                workflow="prepare_manual_submit",
+                page_url=page.url,
+                page_title=page_title,
+                visible_action_candidates=[],
+                selected_action="arbeitnow_fill_known_fields_stop_before_submit",
+                risk_classification=RiskClass.FORM_FILL,
+                input_values={"job_id": job_id, "adapter": "arbeitnow", "planned_fills": _audit_fills(fills)},
+                preconditions=["private challenge browser is running", "arbeitnow adapter selected"],
+                postconditions=["known fields filled", "terms checkbox and final submit left for human review"],
+                screenshot_path=str(screenshot_path),
+                result="prepared_manual_submit",
+            )
+        )
+        return {
+            "adapter": "arbeitnow",
+            "prepared": True,
+            "blocked": False,
+            "submitted": False,
+            "clicked": False,
+            "errors": [],
+            "post_fill_url": page.url,
+            "screenshot_path": str(screenshot_path),
+            "manual_review_url": manual_review_url,
+            "fills": _audit_fills(fills),
+            "instructions": "Open the manual_review_url, review the still-open browser tab, check any required terms/privacy box yourself, then press Submit.",
+        }
 
     async def _auto_submit_arbeitnow_page(
         self,

@@ -90,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--job-id", required=True)
     mode = apply.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--prepare", action="store_true", help="Fill known fields in the challenge browser, then stop before final submit")
     mode.add_argument("--confirm", action="store_true")
     mode.add_argument("--auto-submit", action="store_true")
     apply.add_argument(
@@ -169,6 +170,25 @@ async def _run_async(args: argparse.Namespace, settings: Settings) -> int:
         print(f"Approval saved: {approval_path}")
         await BrowserEngine(settings, recorder).manual_submission_review(str(job["url"]), args.job_id)
         return 0
+    if args.command == "apply" and args.prepare:
+        workflow = ApplicationWorkflow(settings, recorder)
+        if workflow.repository.has_submission(args.job_id):
+            print(json.dumps({"prepared": False, "reasons": ["job already has a local submission record"]}, indent=2))
+            return 2
+        draft_path = workflow.draft(args.job_id)
+        draft = json.loads(draft_path.read_text(encoding="utf-8"))
+        config = load_autopilot(settings)
+        result = await BrowserEngine(settings, recorder).prepare_application_for_manual_submit(
+            str(draft["job"]["url"]),
+            args.job_id,
+            draft["answers"],
+            config,
+        )
+        if result.get("prepared"):
+            prepared_path = workflow.record_prepared_manual_submit(args.job_id, result)
+            print(f"Prepared application saved: {prepared_path}")
+        print(json.dumps(result, indent=2, ensure_ascii=True))
+        return 0 if result.get("prepared") else 2
     if args.command == "apply" and args.auto_submit:
         workflow = ApplicationWorkflow(settings, recorder)
         if workflow.repository.has_submission(args.job_id):
@@ -209,6 +229,8 @@ async def _run_async(args: argparse.Namespace, settings: Settings) -> int:
 def run(args: argparse.Namespace, settings: Settings) -> int:
     if args.command in {"login-session", "gmail-check", "page-context", "smoke-test", "search-jobs", "worker-once", "worker"} or (
         args.command == "apply" and (args.confirm or args.auto_submit)
+    ) or (
+        args.command == "apply" and args.prepare
     ):
         if args.command == "apply" and (args.confirm or args.auto_submit) and args.with_llm:
             raise PolicyViolation("--with-llm is available only for a dry-run draft.")

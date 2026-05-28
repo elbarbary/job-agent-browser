@@ -289,6 +289,19 @@ Greenhouse, and SmartRecruiters pages:
 .venv/bin/python -m app.main apply --job-id <id> --dry-run
 ```
 
+To let the agent fill known fields but leave final submission to you, start the
+private challenge browser first, then run:
+
+```bash
+scripts/start_challenge_browser.sh
+.venv/bin/python -m app.main apply --job-id <id> --prepare
+```
+
+The dashboard will mark the job as `prepared_manual_submit` and show a review link.
+Open that link, review the filled browser tab, answer anything still missing, check
+any required consent/terms boxes yourself, and press Submit manually. The prepare
+mode never clicks the final submit/apply button.
+
 Public search engines may present an anti-automation interstitial. In that case, use
 the background feed worker or supply a public ATS posting URL directly:
 
