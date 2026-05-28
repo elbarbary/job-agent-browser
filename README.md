@@ -246,6 +246,37 @@ A visible Chrome window uses `data/sessions/browser-profile`. Log in yourself, d
 any browser prompt to save raw passwords, and return to the terminal when done. Treat
 that directory like a credential store because it retains authenticated cookies.
 
+If you are on a different device or a plain SSH terminal with no graphical display,
+use the private challenge browser instead. It starts a virtual display and a noVNC
+web client bound to `127.0.0.1` on the remote machine:
+
+```bash
+cd ~/job-agent-browser
+scripts/start_challenge_browser.sh
+```
+
+From your other device, open an SSH tunnel:
+
+```bash
+ssh -N -L 6080:127.0.0.1:6080 barbary@100.116.208.74
+```
+
+Then open this local URL on that other device:
+
+```text
+http://127.0.0.1:6080/vnc.html?host=127.0.0.1&port=6080&autoconnect=1
+```
+
+Use this browser to log in or solve human challenges. When finished, stop it and
+restart the worker if it was paused:
+
+```bash
+scripts/stop_challenge_browser.sh
+```
+
+Do not expose ports `5901` or `6080` publicly. They are intended to be reached only
+through the SSH tunnel.
+
 ## Search And Draft
 
 The always-on worker discovers jobs from public feeds without needing you to maintain
