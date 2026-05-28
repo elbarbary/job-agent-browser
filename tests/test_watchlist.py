@@ -19,8 +19,9 @@ class WatchlistTests(unittest.TestCase):
             self.assertTrue(watchlist["public_feeds_enabled"])
             self.assertFalse(watchlist["queries_enabled"])
             self.assertEqual(watchlist["auto_draft_top_n"], 5)
+            self.assertEqual(watchlist["autopilot_scan_top_n"], 25)
             self.assertEqual(watchlist["min_auto_draft_score"], 45)
-            self.assertIn("never submits", " ".join(watchlist["notes"]).lower())
+            self.assertIn("autopilot submissions require private", " ".join(watchlist["notes"]).lower())
 
 
 if __name__ == "__main__":

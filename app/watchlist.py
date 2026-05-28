@@ -15,6 +15,7 @@ DEFAULT_WATCHLIST: dict[str, Any] = {
     "generated_at": None,
     "interval_minutes": 180,
     "auto_draft_top_n": 5,
+    "autopilot_scan_top_n": 25,
     "min_auto_draft_score": 45,
     "with_llm_advisory": True,
     "public_feeds_enabled": True,
@@ -32,7 +33,7 @@ DEFAULT_WATCHLIST: dict[str, Any] = {
         "Public feeds currently include Remotive, RemoteOK, and Arbeitnow.",
         "General search engines may block automation. Add approved Lever/Greenhouse/SmartRecruiters posting URLs to source_urls for reliable polling.",
         "Set queries_enabled to true only if public search pages are working from this host.",
-        "The worker drafts locally only for jobs at or above min_auto_draft_score. It never submits applications or sends email.",
+        "The worker drafts locally only for jobs at or above min_auto_draft_score. Autopilot submissions require private autopilot.json authorization.",
     ],
 }
 

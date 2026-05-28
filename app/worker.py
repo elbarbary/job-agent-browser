@@ -27,6 +27,25 @@ from .webabi.recorder import AuditRecorder
 LOGGER = logging.getLogger("job_agent_worker")
 
 
+def _job_score(job: dict[str, Any]) -> int:
+    try:
+        return int(job.get("match_score", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def select_worker_jobs(
+    ranked_jobs: list[dict[str, Any]],
+    *,
+    min_score: int,
+    draft_top_n: int,
+    autopilot_scan_top_n: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return visible drafts and the wider autopilot candidate scan window."""
+    eligible = [job for job in ranked_jobs if _job_score(job) >= min_score]
+    return eligible[: max(0, draft_top_n)], eligible[: max(0, autopilot_scan_top_n)]
+
+
 def setup_logging(settings: Settings) -> Path:
     settings.ensure_directories()
     path = settings.log_dir / "worker.log"
@@ -111,9 +130,17 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
     max_autopilot_submits = int(autopilot_config.get("max_submissions_per_run", 1))
     browser_engine = BrowserEngine(settings, recorder)
     min_score = int(watchlist.get("min_auto_draft_score", 45))
-    draftable_jobs = [
-        job for job in ranked if int(job.get("match_score", 0)) >= min_score
-    ][: int(watchlist.get("auto_draft_top_n", 5))]
+    draft_top_n = int(watchlist.get("auto_draft_top_n", 5))
+    autopilot_scan_top_n = int(
+        watchlist.get("autopilot_scan_top_n", max(draft_top_n, max_autopilot_submits * 3))
+    )
+    draftable_jobs, autopilot_candidates = select_worker_jobs(
+        ranked,
+        min_score=min_score,
+        draft_top_n=draft_top_n,
+        autopilot_scan_top_n=autopilot_scan_top_n,
+    )
+    draft_paths: dict[str, Path] = {}
     for job in draftable_jobs:
         job_id = str(job["id"])
         advisory = None
@@ -123,7 +150,11 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
             except LocalLLMError as exc:
                 errors.append(f"LLM advisory failed for {job_id}: {exc}")
         draft_path = workflow.draft(job_id, advisory)
+        draft_paths[job_id] = draft_path
         drafted.append(job_id)
+
+    for job in autopilot_candidates:
+        job_id = str(job["id"])
         if repository.has_submission(job_id):
             autopilot_blocked.append({"job_id": job_id, "reasons": ["job already has a local submission record"]})
             continue
@@ -131,7 +162,18 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
             autopilot_blocked.append({"job_id": job_id, "reasons": ["job already has an unverified submit-click record"]})
             continue
         if len(autopilot_submitted) >= max_autopilot_submits:
-            continue
+            break
+        draft_path = draft_paths.get(job_id)
+        if draft_path is None:
+            advisory = None
+            if llm:
+                try:
+                    advisory = llm.grounded_job_advisory(profile, job)
+                except LocalLLMError as exc:
+                    errors.append(f"LLM advisory failed for {job_id}: {exc}")
+            draft_path = workflow.draft(job_id, advisory)
+            draft_paths[job_id] = draft_path
+            drafted.append(job_id)
         try:
             draft_payload = json.loads(draft_path.read_text(encoding="utf-8"))
             decision = decide_autopilot_for_job(
@@ -167,6 +209,10 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         "generated_at": datetime.now(UTC).isoformat(),
         "jobs_known": len(ranked),
         "jobs_found_this_run": len(found),
+        "eligible_jobs": len([job for job in ranked if _job_score(job) >= min_score]),
+        "auto_draft_top_n": draft_top_n,
+        "autopilot_scan_top_n": autopilot_scan_top_n,
+        "max_autopilot_submissions_per_run": max_autopilot_submits,
         "drafted_job_ids": drafted,
         "autopilot_submitted_job_ids": autopilot_submitted,
         "autopilot_blocked": autopilot_blocked,
