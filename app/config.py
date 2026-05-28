@@ -67,7 +67,7 @@ class Settings:
             dashboard_port=int(os.getenv("JOB_AGENT_DASHBOARD_PORT", "7860")),
             manual_review_url=os.getenv("JOB_AGENT_MANUAL_REVIEW_URL", ""),
             web_search_provider=(os.getenv("JOB_AGENT_WEB_SEARCH_PROVIDER") or "searxng").strip().lower(),
-            searxng_base_url=(os.getenv("JOB_AGENT_SEARXNG_URL") or "http://127.0.0.1:8080").rstrip("/"),
+            searxng_base_url=(os.getenv("JOB_AGENT_SEARXNG_URL") or "http://127.0.0.1:8099").rstrip("/"),
         )
         settings.validate()
         return settings
