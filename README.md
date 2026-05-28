@@ -307,6 +307,29 @@ the tracker records an `unverified_submit_click` instead of a submission.
 Autopilot will not retry jobs that already have an unverified submit-click record;
 review those manually before clearing or archiving the attempt.
 
+### Site-Specific Adapters
+
+The generic form engine is deliberately conservative. Some sites need a stronger
+adapter because they submit through JavaScript and show errors without navigating.
+The Arbeitnow adapter handles its built-in application form directly:
+
+- fills first name, last name, email, and CV upload from known profile/config data;
+- checks the Arbeitnow success message instead of relying on URL changes;
+- records visible `error-*` field messages such as missing terms or invalid file;
+- refuses to retry jobs with existing unverified submit-click records.
+
+Arbeitnow requires an application terms/privacy checkbox. Autopilot will check that
+box only if private `data/profiles/autopilot.json` contains:
+
+```json
+{
+  "allow_application_terms_checkbox": true
+}
+```
+
+Keep that setting private. It represents permission to agree to ordinary application
+portal terms/privacy checkboxes during an application submit attempt.
+
 No email confirmation is guaranteed. Some sites send no email, some delay it, some
 route it to the email field used in the CV/profile, and some require backend
 validation after the click.

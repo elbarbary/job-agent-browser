@@ -31,11 +31,13 @@ DEFAULT_AUTOPILOT: dict[str, Any] = {
     "block_file_uploads": True,
     "block_required_checkboxes": True,
     "block_unknown_required_fields": True,
+    "allow_application_terms_checkbox": False,
     "notes": [
         f"Set standing_authorization exactly to: {AUTHORIZATION_PHRASE}",
         "Keep this file private. It represents standing permission to submit eligible applications.",
         "Autopilot submits only simple forms where required fields can be answered from CV/profile/preferences.",
         "Autopilot requires candidate_user_confirmed_facts.profile_reviewed=true by default.",
+        "Set allow_application_terms_checkbox=true only if you authorize agreeing to ordinary application terms/privacy checkboxes.",
         "Autopilot blocks file uploads, required checkboxes, payments, destructive actions, and unknown required answers.",
     ],
 }

@@ -257,6 +257,15 @@ class BrowserEngine:
             page = await browser.new_page()
             await page.goto(url)
             await asyncio.sleep(1.25)
+            page_url = str(await page.get_url())
+            if _is_arbeitnow_job_page(page_url):
+                return await self._auto_submit_arbeitnow_page(
+                    page,
+                    page_url,
+                    job_id,
+                    answers,
+                    autopilot_config,
+                )
             snapshot = _decoded_json(await page.evaluate(AUTOPILOT_SNAPSHOT_SCRIPT))
             page_url = str(await page.get_url())
             page_title = str(snapshot.get("title") or job_id)
@@ -309,6 +318,7 @@ class BrowserEngine:
             page_url = str(await page.get_url())
             post_state = _decoded_json(await page.evaluate(AUTOPILOT_POST_SUBMIT_SCRIPT))
             verified = _submission_verified(post_state)
+            post_errors = [] if verified else _post_submit_errors(post_state) or ["No post-submit confirmation was detected."]
             screenshot_path = self._save_read_only_screenshot(await page.screenshot(), "autopilot-submit")
             self.recorder.record(
                 ActionRecord(
@@ -332,7 +342,7 @@ class BrowserEngine:
                     ],
                     screenshot_path=str(screenshot_path),
                     result="submit_confirmed" if verified else "submit_clicked_unverified",
-                    errors=[] if verified else ["No post-submit confirmation was detected."],
+                    errors=post_errors,
                     approved=True,
                 )
             )
@@ -341,12 +351,162 @@ class BrowserEngine:
                 "clicked": True,
                 "blocked": False,
                 "verified": verified,
-                "errors": [] if verified else ["No post-submit confirmation was detected."],
+                "errors": post_errors,
                 "post_submit_url": page_url,
                 "fills": _audit_fills(fills),
             }
         finally:
             await browser.stop()
+
+    async def _auto_submit_arbeitnow_page(
+        self,
+        page: Any,
+        url: str,
+        job_id: str,
+        answers: dict[str, Any],
+        autopilot_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        snapshot = _decoded_json(await page.evaluate(ARBEITNOW_SNAPSHOT_SCRIPT))
+        page_title = str(snapshot.get("title") or job_id)
+        errors: list[str] = []
+        fills: list[dict[str, Any]] = []
+
+        if not snapshot.get("form_present"):
+            errors.append("Arbeitnow application form was not found.")
+        if not snapshot.get("button_present"):
+            errors.append("Arbeitnow apply button was not found.")
+
+        first_name, last_name = _split_name(answers.get("name"))
+        field_values = {
+            "first_name": first_name,
+            "last_name": last_name,
+            "email": str(answers["email"]) if is_known(answers.get("email")) else None,
+        }
+        labels = {
+            "first_name": "First name",
+            "last_name": "Last name",
+            "email": "Email address",
+        }
+        for name, value in field_values.items():
+            if value:
+                fills.append({"selector": f"#{name}", "label": labels[name], "value": value, "kind": "text"})
+            else:
+                errors.append(f"Arbeitnow required field has no known answer: {labels[name]}")
+
+        resume_path = Path(str(autopilot_config.get("resume_path") or "")).expanduser()
+        if autopilot_config.get("block_file_uploads", True) or not resume_path.exists():
+            errors.append("Arbeitnow CV/resume upload is blocked or resume_path does not exist.")
+        else:
+            fills.append(
+                {
+                    "selector": "#cv_or_resume",
+                    "label": "CV / Resume",
+                    "value": str(resume_path.resolve()),
+                    "kind": "file",
+                }
+            )
+
+        if snapshot.get("terms_present"):
+            if autopilot_config.get("allow_application_terms_checkbox") is True:
+                fills.append(
+                    {
+                        "selector": "#terms",
+                        "label": "Application terms and privacy checkbox",
+                        "value": True,
+                        "kind": "checkbox",
+                    }
+                )
+            else:
+                errors.append(
+                    "Arbeitnow requires an application terms/privacy checkbox. "
+                    "Set allow_application_terms_checkbox=true only if the user authorizes this."
+                )
+
+        if errors:
+            screenshot_path = self._save_read_only_screenshot(await page.screenshot(), "arbeitnow-blocked")
+            self.recorder.record(
+                ActionRecord(
+                    run_id=self.recorder.run_id,
+                    workflow="autopilot_submit",
+                    page_url=url,
+                    page_title=page_title,
+                    visible_action_candidates=[],
+                    selected_action="arbeitnow_blocked_before_submit",
+                    risk_classification=RiskClass.JOB_SUBMIT,
+                    input_values={"job_id": job_id, "planned_fills": _audit_fills(fills)},
+                    preconditions=["private autopilot standing authorization exists", "arbeitnow adapter selected"],
+                    postconditions=["no submit button was clicked"],
+                    screenshot_path=str(screenshot_path),
+                    result="blocked",
+                    errors=errors,
+                    approved=True,
+                )
+            )
+            return {
+                "adapter": "arbeitnow",
+                "submitted": False,
+                "clicked": False,
+                "blocked": True,
+                "errors": errors,
+                "fills": _audit_fills(fills),
+            }
+
+        text_fills = {fill["selector"]: fill["value"] for fill in fills if fill.get("kind") == "text"}
+        await page.evaluate(_arbeitnow_fill_script(text_fills))
+        for fill in fills:
+            if fill.get("kind") == "file":
+                await _upload_file_selector(page, str(fill["selector"]), str(fill["value"]))
+            elif fill.get("kind") == "checkbox":
+                await page.evaluate(_checkbox_script(str(fill["selector"]), checked=True))
+        await asyncio.sleep(0.5)
+        await page.evaluate("() => document.querySelector('#button_send_application').click()")
+        post_state = await _wait_for_arbeitnow_result(page)
+        verified = _submission_verified(post_state)
+        post_errors = [] if verified else _post_submit_errors(post_state) or ["No post-submit confirmation was detected."]
+        screenshot_path = self._save_read_only_screenshot(await page.screenshot(), "arbeitnow-submit")
+        page_url = str(await page.get_url())
+        self.recorder.record(
+            ActionRecord(
+                run_id=self.recorder.run_id,
+                workflow="autopilot_submit",
+                page_url=page_url,
+                page_title=page_title,
+                visible_action_candidates=[],
+                selected_action="arbeitnow_submit_application_form",
+                risk_classification=RiskClass.JOB_SUBMIT,
+                input_values={
+                    "job_id": job_id,
+                    "adapter": "arbeitnow",
+                    "planned_fills": _audit_fills(fills),
+                    "post_submit_state": _audit_post_state(post_state),
+                },
+                preconditions=[
+                    "private autopilot standing authorization exists",
+                    "arbeitnow form adapter selected",
+                    "required fields mapped to known answers",
+                ],
+                postconditions=[
+                    "arbeitnow apply button clicked",
+                    "success div and visible field errors checked",
+                    "audit screenshot saved",
+                ],
+                screenshot_path=str(screenshot_path),
+                result="submit_confirmed" if verified else "submit_clicked_unverified",
+                errors=post_errors,
+                approved=True,
+            )
+        )
+        return {
+            "adapter": "arbeitnow",
+            "submitted": verified,
+            "clicked": True,
+            "blocked": False,
+            "verified": verified,
+            "errors": post_errors,
+            "post_submit_url": page_url,
+            "post_submit_state": _audit_post_state(post_state),
+            "fills": _audit_fills(fills),
+        }
 
     async def extract_job_links(self, search_url: str) -> list[dict[str, str]]:
         observation = await self.observe_page(search_url)
@@ -446,6 +606,17 @@ def _decode_search_target(href: str) -> str:
     return href
 
 
+def _is_arbeitnow_job_page(url: str) -> bool:
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname == "www.arbeitnow.com"
+        and path.startswith("/jobs/companies/")
+        and not path.endswith("/apply")
+    )
+
+
 def _decoded_json(value: Any) -> Any:
     if not isinstance(value, str):
         return value
@@ -453,6 +624,31 @@ def _decoded_json(value: Any) -> Any:
         return json.loads(value)
     except json.JSONDecodeError:
         return value
+
+
+ARBEITNOW_SNAPSHOT_SCRIPT = """() => {
+    const form = document.querySelector('#form_job_application');
+    const button = document.querySelector('#button_send_application');
+    const terms = document.querySelector('#terms');
+    const success = document.querySelector('#div_success_message');
+    const visible = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    return {
+        title: document.title || '',
+        url: location.href,
+        form_present: Boolean(form),
+        form_visible: visible(form),
+        button_present: Boolean(button),
+        terms_present: Boolean(terms),
+        terms_label: (document.querySelector('label[for="terms"]')?.innerText || '').replace(/\\s+/g, ' ').trim(),
+        success_present: Boolean(success),
+        success_visible: visible(success)
+    };
+}"""
 
 
 AUTOPILOT_SNAPSHOT_SCRIPT = """() => {
@@ -619,18 +815,62 @@ def _choose_submit_button(buttons: list[dict[str, Any]]) -> dict[str, Any] | Non
 AUTOPILOT_POST_SUBMIT_SCRIPT = """() => ({
     title: document.title || '',
     url: location.href,
-    text: (document.body && document.body.innerText || '').slice(0, 5000)
+    text: (document.body && document.body.innerText || '').slice(0, 5000),
+    visible_errors: Array.from(document.querySelectorAll('[id^="error-"]'))
+        .filter(el => {
+            const r = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return (el.innerText || '').trim() && r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        })
+        .map(el => ({id: el.id || '', text: (el.innerText || '').replace(/\\s+/g, ' ').trim()}))
 })"""
+
+
+ARBEITNOW_POST_SUBMIT_SCRIPT = """() => {
+    const visible = (el) => {
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const form = document.querySelector('#form_job_application');
+    const success = document.querySelector('#div_success_message');
+    const visibleErrors = Array.from(document.querySelectorAll('[id^="error-"]'))
+        .filter(el => (el.innerText || '').trim() && visible(el))
+        .map(el => ({id: el.id || '', text: (el.innerText || '').replace(/\\s+/g, ' ').trim()}));
+    return {
+        title: document.title || '',
+        url: location.href,
+        text: (document.body && document.body.innerText || '').slice(0, 5000),
+        form_visible: visible(form),
+        success_visible: visible(success),
+        success_text: success ? (success.innerText || '').replace(/\\s+/g, ' ').trim() : '',
+        visible_errors: visibleErrors
+    };
+}"""
+
+
+async def _wait_for_arbeitnow_result(page: Any) -> Any:
+    post_state: Any = {}
+    for _ in range(20):
+        post_state = _decoded_json(await page.evaluate(ARBEITNOW_POST_SUBMIT_SCRIPT))
+        if _submission_verified(post_state) or _post_submit_errors(post_state):
+            return post_state
+        await asyncio.sleep(0.5)
+    return post_state
 
 
 def _submission_verified(post_state: Any) -> bool:
     if not isinstance(post_state, dict):
         return False
+    if post_state.get("success_visible") is True:
+        return True
     haystack = " ".join(str(post_state.get(key, "")) for key in ("title", "url", "text")).casefold()
     success_markers = (
         "application submitted",
         "application received",
         "successfully submitted",
+        "job application has been sent successfully",
         "we received your application",
         "we have received your application",
         "thanks for applying",
@@ -641,6 +881,33 @@ def _submission_verified(post_state: Any) -> bool:
         "submission received",
     )
     return any(marker in haystack for marker in success_markers)
+
+
+def _post_submit_errors(post_state: Any) -> list[str]:
+    if not isinstance(post_state, dict):
+        return []
+    errors: list[str] = []
+    for item in post_state.get("visible_errors") or []:
+        if isinstance(item, dict):
+            text = str(item.get("text") or "").strip()
+            if text:
+                field = str(item.get("id") or "form_error").removeprefix("error-")
+                errors.append(f"{field}: {text}")
+        elif item:
+            errors.append(str(item))
+    return errors
+
+
+def _audit_post_state(post_state: Any) -> dict[str, Any]:
+    if not isinstance(post_state, dict):
+        return {}
+    return {
+        "url": post_state.get("url"),
+        "success_visible": post_state.get("success_visible"),
+        "success_text": post_state.get("success_text"),
+        "form_visible": post_state.get("form_visible"),
+        "visible_errors": post_state.get("visible_errors") or [],
+    }
 
 
 def _fill_form_script(fills: list[dict[str, Any]]) -> str:
@@ -667,6 +934,35 @@ def _fill_form_script(fills: list[dict[str, Any]]) -> str:
     }}"""
 
 
+def _arbeitnow_fill_script(values: dict[str, Any]) -> str:
+    payload = json.dumps(values)
+    return f"""() => {{
+        const values = {payload};
+        for (const [selector, value] of Object.entries(values)) {{
+            const el = document.querySelector(selector);
+            if (!el) throw new Error(`Missing Arbeitnow field: ${{selector}}`);
+            el.focus();
+            el.value = value;
+            el.dispatchEvent(new Event('input', {{bubbles: true}}));
+            el.dispatchEvent(new Event('change', {{bubbles: true}}));
+        }}
+        return Object.keys(values).length;
+    }}"""
+
+
+def _checkbox_script(selector: str, *, checked: bool) -> str:
+    payload = json.dumps({"selector": selector, "checked": checked})
+    return f"""() => {{
+        const payload = {payload};
+        const el = document.querySelector(payload.selector);
+        if (!el) throw new Error(`Missing checkbox: ${{payload.selector}}`);
+        el.checked = Boolean(payload.checked);
+        el.dispatchEvent(new Event('input', {{bubbles: true}}));
+        el.dispatchEvent(new Event('change', {{bubbles: true}}));
+        return el.checked;
+    }}"""
+
+
 async def _upload_file_fields(page: Any, fills: list[dict[str, Any]]) -> None:
     if not fills:
         return
@@ -686,6 +982,23 @@ async def _upload_file_fields(page: Any, fills: list[dict[str, Any]]) -> None:
             {"nodeId": node_id, "files": [str(fill["value"])]},
             session_id=session_id,
         )
+
+
+async def _upload_file_selector(page: Any, selector: str, file_path: str) -> None:
+    session_id = await page.session_id
+    document = await page._client.send.DOM.getDocument({"depth": -1, "pierce": True}, session_id=session_id)
+    root_id = document["root"]["nodeId"]
+    node = await page._client.send.DOM.querySelector(
+        {"nodeId": root_id, "selector": selector},
+        session_id=session_id,
+    )
+    node_id = node.get("nodeId")
+    if not node_id:
+        raise BrowserSafetyError(f"Could not find file input for upload: {selector}")
+    await page._client.send.DOM.setFileInputFiles(
+        {"nodeId": node_id, "files": [file_path]},
+        session_id=session_id,
+    )
 
 
 def _audit_fills(fills: list[dict[str, Any]]) -> list[dict[str, Any]]:
