@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import cgi
 import html
 import json
+import os
+import shutil
 import subprocess
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,20 +17,102 @@ from urllib.request import Request, urlopen
 
 from .application_agent import ApplicationRepository
 from .config import LOCAL_HOSTS, ConfigurationError, Settings
+from .cv_store import CVError, ingest_cv
+from .preferences import DEFAULT_USER_PREFERENCES, load_preferences
+from .profile_review import CONFIRM_PROFILE_PHRASE, build_profile_review, mark_profile_reviewed
 
 
 DASHBOARD_NAV = (
     ("Jobs", "/"),
     ("Manual Queue", "/manual"),
+    ("Onboarding", "/onboarding"),
+    ("AI Providers", "/providers"),
+    ("Autopilot", "/autopilot"),
     ("Worker", "/worker"),
     ("Web Search", "/search"),
 )
+
+PROVIDER_ENV_KEYS = {
+    "ollama": [],
+    "openai": ["OPENAI_API_KEY"],
+    "anthropic": ["ANTHROPIC_API_KEY"],
+    "gemini": ["GEMINI_API_KEY"],
+    "deepseek": ["DEEPSEEK_API_KEY"],
+}
+
+PROVIDER_LABELS = {
+    "ollama": "Local Ollama (default)",
+    "openai": "OpenAI / GPT API",
+    "anthropic": "Anthropic / Claude API",
+    "gemini": "Google Gemini API",
+    "deepseek": "DeepSeek API",
+}
 
 
 def _read_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_private_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+def _split_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _gui_settings_path(settings: Settings) -> Path:
+    return settings.profile_dir / "gui_settings.json"
+
+
+def _provider_settings_path(settings: Settings) -> Path:
+    return settings.profile_dir / "llm_providers.json"
+
+
+def load_gui_settings(settings: Settings) -> dict[str, Any]:
+    return _read_json(
+        _gui_settings_path(settings),
+        {
+            "mode": "local_first",
+            "autopilot_mode": "fill_only_manual_submit",
+            "created_by": "dashboard",
+        },
+    )
+
+
+def save_gui_settings(settings: Settings, payload: dict[str, Any]) -> None:
+    existing = load_gui_settings(settings)
+    existing.update(payload)
+    existing["updated_at"] = datetime.now(UTC).isoformat()
+    _write_private_json(_gui_settings_path(settings), existing)
+
+
+def load_provider_settings(settings: Settings) -> dict[str, Any]:
+    return _read_json(
+        _provider_settings_path(settings),
+        {
+            "active_provider": "ollama",
+            "models": {"ollama": settings.ollama_model},
+            "store_api_keys": False,
+            "note": "API keys are read from environment variables only, not stored in this file.",
+        },
+    )
+
+
+def save_provider_settings(settings: Settings, payload: dict[str, Any]) -> None:
+    existing = load_provider_settings(settings)
+    models = existing.setdefault("models", {})
+    provider = str(payload.get("active_provider") or existing.get("active_provider") or "ollama")
+    existing["active_provider"] = provider
+    if payload.get("model"):
+        models[provider] = str(payload["model"])
+    existing["store_api_keys"] = False
+    existing["updated_at"] = datetime.now(UTC).isoformat()
+    _write_private_json(_provider_settings_path(settings), existing)
 
 
 def _read_json_dir(path: Path) -> dict[str, Any]:
@@ -107,6 +192,101 @@ def _dashboard_action(settings: Settings, action: str) -> dict[str, Any]:
             f"{'scripts/start_local_search.sh' if action == 'search-start' else 'scripts/stop_local_search.sh'}"
         )
     return result
+
+
+def _save_preferences_from_form(settings: Settings, form: dict[str, list[str]]) -> dict[str, Any]:
+    preferences = (
+        load_preferences(settings)
+        if (settings.profile_dir / "job_preferences.json").exists()
+        else dict(DEFAULT_USER_PREFERENCES)
+    )
+    preferences["target_roles"] = _split_csv((form.get("target_roles") or [""])[0])
+    preferences["target_locations"] = _split_csv((form.get("target_locations") or [""])[0])
+    remote_preference = (form.get("remote_preference") or [""])[0].strip()
+    if remote_preference:
+        preferences["remote_preference"] = remote_preference
+    facts = dict(preferences.get("candidate_user_confirmed_facts") or {})
+    for key in ("salary_target", "work_authorization_summary", "availability", "relocation"):
+        value = (form.get(key) or [""])[0].strip()
+        if value:
+            facts[key] = value
+        else:
+            facts.pop(key, None)
+    preferences["candidate_user_confirmed_facts"] = facts
+    _write_private_json(settings.profile_dir / "job_preferences.json", preferences)
+    return {"ok": True, "output": "Saved private job preferences."}
+
+
+def _onboarding_action(settings: Settings, form: dict[str, list[str]]) -> dict[str, Any]:
+    action = (form.get("action") or [""])[0]
+    if action == "save-preferences":
+        return _save_preferences_from_form(settings, form)
+    if action == "build-review":
+        try:
+            path = build_profile_review(settings)
+            return {"ok": True, "output": f"Wrote review checklist: {path}"}
+        except Exception as exc:  # noqa: BLE001 - local dashboard should surface setup errors.
+            return {"ok": False, "output": str(exc)}
+    if action == "confirm-profile":
+        confirmation = (form.get("confirmation") or [""])[0]
+        if confirmation != CONFIRM_PROFILE_PHRASE:
+            return {"ok": False, "output": f"Type exactly: {CONFIRM_PROFILE_PHRASE}"}
+        try:
+            mark_profile_reviewed(settings)
+            return {"ok": True, "output": "Profile facts marked reviewed."}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "output": str(exc)}
+    return {"ok": False, "output": f"Unknown onboarding action: {action}"}
+
+
+def _provider_action(settings: Settings, form: dict[str, list[str]]) -> dict[str, Any]:
+    provider = (form.get("provider") or ["ollama"])[0]
+    if provider not in PROVIDER_LABELS:
+        return {"ok": False, "output": f"Unknown provider: {provider}"}
+    model = (form.get("model") or [""])[0].strip()
+    save_provider_settings(settings, {"active_provider": provider, "model": model})
+    missing = [key for key in PROVIDER_ENV_KEYS[provider] if not os.environ.get(key)]
+    suffix = f" Missing env vars: {', '.join(missing)}." if missing else ""
+    return {"ok": True, "output": f"Saved provider preference: {PROVIDER_LABELS[provider]}.{suffix}"}
+
+
+def _autopilot_action(settings: Settings, form: dict[str, list[str]]) -> dict[str, Any]:
+    action = (form.get("action") or [""])[0]
+    if action == "safe-fill-only":
+        save_gui_settings(settings, {"autopilot_mode": "fill_only_manual_submit"})
+        return {"ok": True, "output": "GUI Autopilot set to fill-only; you press final Submit."}
+    if action == "manual-only":
+        save_gui_settings(settings, {"autopilot_mode": "manual_review_only"})
+        return {"ok": True, "output": "GUI mode set to manual review only."}
+    return {"ok": False, "output": f"Unknown autopilot action: {action}"}
+
+
+def _upload_cv(settings: Settings, handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+    content_type = handler.headers.get("Content-Type", "")
+    if not content_type.startswith("multipart/form-data"):
+        return {"ok": False, "output": "Expected multipart CV upload."}
+    form = cgi.FieldStorage(
+        fp=handler.rfile,
+        headers=handler.headers,
+        environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": content_type},
+    )
+    field = form["cv_file"] if "cv_file" in form else None
+    if field is None or not getattr(field, "filename", ""):
+        return {"ok": False, "output": "No CV file was uploaded."}
+    filename = Path(field.filename).name
+    suffix = Path(filename).suffix.lower()
+    if suffix not in {".pdf", ".docx"}:
+        return {"ok": False, "output": "Only PDF and DOCX CV uploads are supported."}
+    destination = settings.cv_dir / filename
+    settings.cv_dir.mkdir(parents=True, exist_ok=True)
+    with destination.open("wb") as output:
+        shutil.copyfileobj(field.file, output)
+    destination.chmod(0o600)
+    try:
+        result = ingest_cv(destination, settings)
+    except CVError as exc:
+        return {"ok": False, "output": str(exc)}
+    return {"ok": True, "output": f"Uploaded and extracted CV: {result.source_path}"}
 
 
 def tracker_status(settings: Settings) -> dict[str, Any]:
@@ -284,7 +464,7 @@ def _dashboard_shell(
     .review, button {{ display: inline-block; margin: 6px 8px 6px 0; border-radius: 999px; padding: 8px 12px; background: #1d4ed8; color: white; border: 0; text-decoration: none; cursor: pointer; }}
     .review.secondary, button.secondary {{ background: #5b3fd6; }}
     button.danger {{ background: #b91c1c; }}
-    input[type="search"] {{ width: min(680px, 100%); padding: 10px 12px; border-radius: 12px; border: 1px solid #d5c8b5; }}
+    input[type="search"], input[type="text"], input:not([type]), select {{ width: min(680px, 100%); padding: 10px 12px; border-radius: 12px; border: 1px solid #d5c8b5; }}
     a {{ color: #5b3fd6; word-break: break-word; }}
     table {{ border-collapse: collapse; width: 100%; margin-top: 10px; }}
     th, td {{ border-top: 1px solid #eadfce; text-align: left; padding: 8px; vertical-align: top; }}
@@ -462,6 +642,141 @@ def render_search_html(settings: Settings, status: dict[str, Any], *, query: str
     return _dashboard_shell(title="Web Search", generated_at=status["generated_at"], body=body, active_path="/search", message=message)
 
 
+def _file_status(path: Path) -> str:
+    return "present" if path.exists() else "missing"
+
+
+def render_onboarding_html(settings: Settings, status: dict[str, Any], *, message: str = "") -> str:
+    preferences = load_preferences(settings)
+    profile_path = settings.profile_dir / "candidate_profile.json"
+    extracted_path = settings.profile_dir / "cv_extracted.md"
+    review_path = settings.profile_dir / "profile_review.md"
+    confirmed = bool((preferences.get("candidate_user_confirmed_facts") or {}).get("profile_reviewed"))
+    roles = ", ".join(preferences.get("target_roles") or [])
+    locations = ", ".join(preferences.get("target_locations") or [])
+    facts = preferences.get("candidate_user_confirmed_facts") or {}
+    profile_preview = html.escape(json.dumps(_read_json(profile_path, {}), indent=2, ensure_ascii=True)[:9000])
+    review_preview = html.escape(review_path.read_text(encoding="utf-8")[:9000]) if review_path.exists() else ""
+    body = _summary_cards(status["counts"]) + f"""
+    <section class="panel">
+      <h2>Guided Setup</h2>
+      <p>This is the less-technical path: upload a CV, save preferences, review extracted facts, log in manually, then run safe fill-only application prep from the dashboard.</p>
+      <table>
+        <tr><th>CV extracted text</th><td>{html.escape(_file_status(extracted_path))}</td></tr>
+        <tr><th>Candidate profile</th><td>{html.escape(_file_status(profile_path))}</td></tr>
+        <tr><th>Profile reviewed</th><td>{'yes' if confirmed else 'no'}</td></tr>
+        <tr><th>Gmail/browser login</th><td>Use the persistent browser login command below; passwords are never stored by the app.</td></tr>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>1. Upload CV</h2>
+      <p>PDF and DOCX are supported. The file is copied into private ignored storage under <code>data/cv/</code>.</p>
+      <form method="post" action="/upload-cv" enctype="multipart/form-data">
+        <input type="file" name="cv_file" accept=".pdf,.docx" required>
+        <button type="submit">Upload and extract CV</button>
+      </form>
+    </section>
+
+    <section class="panel">
+      <h2>2. Preferences</h2>
+      <form method="post" action="/onboarding-action">
+        <input type="hidden" name="action" value="save-preferences">
+        <label>Target roles<br><input name="target_roles" value="{html.escape(roles)}" placeholder="AI Product Manager, Product Engineer"></label><br><br>
+        <label>Target locations<br><input name="target_locations" value="{html.escape(locations)}" placeholder="Switzerland, Europe, Remote"></label><br><br>
+        <label>Remote preference<br><input name="remote_preference" value="{html.escape(str(preferences.get('remote_preference') or ''))}" placeholder="remote, hybrid, onsite"></label><br><br>
+        <label>Target salary / compensation notes<br><input name="salary_target" value="{html.escape(str(facts.get('salary_target') or ''))}" placeholder="User-confirmed only"></label><br><br>
+        <label>Work authorization / sponsorship notes<br><input name="work_authorization_summary" value="{html.escape(str(facts.get('work_authorization_summary') or ''))}" placeholder="User-confirmed only"></label><br><br>
+        <label>Availability<br><input name="availability" value="{html.escape(str(facts.get('availability') or ''))}" placeholder="immediately, after graduation, etc."></label><br><br>
+        <label>Relocation preference<br><input name="relocation" value="{html.escape(str(facts.get('relocation') or ''))}" placeholder="open to relocate, remote only, etc."></label><br><br>
+        <button type="submit">Save private preferences</button>
+      </form>
+    </section>
+
+    <section class="panel">
+      <h2>3. Review Extracted Profile</h2>
+      <p>Anything not in your CV or private preferences remains unknown; the agent must mark those as questions instead of inventing answers.</p>
+      <form method="post" action="/onboarding-action">
+        <button name="action" value="build-review">Build review checklist</button>
+      </form>
+      <form method="post" action="/onboarding-action">
+        <input type="hidden" name="action" value="confirm-profile">
+        <label>Type <code>{CONFIRM_PROFILE_PHRASE}</code><br><input name="confirmation" placeholder="{CONFIRM_PROFILE_PHRASE}"></label>
+        <button type="submit">Confirm reviewed facts</button>
+      </form>
+      <details open><summary>Candidate profile JSON</summary><pre>{profile_preview or 'No profile extracted yet.'}</pre></details>
+      <details><summary>Review checklist</summary><pre>{review_preview or 'No review checklist yet.'}</pre></details>
+    </section>
+
+    <section class="panel">
+      <h2>4. Manual Gmail / Site Login</h2>
+      <p>Run this once from the machine that hosts the browser session, then log into Gmail and job sites manually:</p>
+      <code>.venv/bin/python -m app.main login-session</code>
+      <p>The saved browser profile stays local in <code>data/sessions/browser-profile</code>. The app never asks for raw Gmail passwords.</p>
+    </section>
+    """
+    return _dashboard_shell(title="Onboarding", generated_at=status["generated_at"], body=body, active_path="/onboarding", message=message)
+
+
+def render_provider_html(settings: Settings, status: dict[str, Any], *, message: str = "") -> str:
+    provider_settings = load_provider_settings(settings)
+    active_provider = str(provider_settings.get("active_provider") or "ollama")
+    models = provider_settings.get("models") or {}
+    rows = []
+    for provider, label in PROVIDER_LABELS.items():
+        env_keys = PROVIDER_ENV_KEYS[provider]
+        env_state = "local/no key needed" if not env_keys else ", ".join(
+            f"{key}={'set' if os.environ.get(key) else 'missing'}" for key in env_keys
+        )
+        rows.append(
+            f"<tr><th>{html.escape(label)}</th><td>{'active' if provider == active_provider else 'available'}</td>"
+            f"<td>{html.escape(str(models.get(provider) or 'user configured'))}</td><td>{html.escape(env_state)}</td></tr>"
+        )
+    options = "".join(
+        f'<option value="{provider}" {"selected" if provider == active_provider else ""}>{html.escape(label)}</option>'
+        for provider, label in PROVIDER_LABELS.items()
+    )
+    body = _summary_cards(status["counts"]) + f"""
+    <section class="panel">
+      <h2>AI Provider Mode</h2>
+      <p>Local Ollama remains the default. External APIs are optional and read keys from environment variables only; this dashboard never stores API keys.</p>
+      <form method="post" action="/provider-action">
+        <label>Provider<br><select name="provider">{options}</select></label><br><br>
+        <label>Model name<br><input name="model" value="{html.escape(str(models.get(active_provider) or ''))}" placeholder="Leave blank to keep current/default"></label><br><br>
+        <button type="submit">Save provider preference</button>
+      </form>
+      <h3>Status</h3>
+      <table><tr><th>Provider</th><th>State</th><th>Model</th><th>Environment</th></tr>{''.join(rows)}</table>
+      <p>Set API keys in your private shell or <code>.env</code> only. Do not paste keys into application forms or commit them.</p>
+    </section>
+    """
+    return _dashboard_shell(title="AI Providers", generated_at=status["generated_at"], body=body, active_path="/providers", message=message)
+
+
+def render_autopilot_html(settings: Settings, status: dict[str, Any], *, message: str = "") -> str:
+    gui_settings = load_gui_settings(settings)
+    mode = str(gui_settings.get("autopilot_mode") or "fill_only_manual_submit")
+    body = _summary_cards(status["counts"]) + f"""
+    <section class="panel">
+      <h2>Autopilot</h2>
+      <p><strong>GUI Autopilot means fill-only:</strong> the agent may prepare safe drafts and filled pages, but you press the final Submit button yourself.</p>
+      <p>Current GUI mode: <code>{html.escape(mode)}</code></p>
+      <form method="post" action="/autopilot-action">
+        <button name="action" value="safe-fill-only">Use Autopilot: AI fills, I submit</button>
+        <button class="secondary" name="action" value="manual-only">Use manual review only</button>
+      </form>
+      <p>For advanced users, the old CLI autopilot config still exists at <code>data/profiles/autopilot.json</code>. It is private and ignored by git.</p>
+    </section>
+    <section class="panel">
+      <h2>One-Run GUI Command</h2>
+      <p>Start the local dashboard and helper services with:</p>
+      <code>scripts/start_gui.sh</code>
+      <p>Then open <code>http://127.0.0.1:{settings.dashboard_port}</code> on the same device or through your private tunnel.</p>
+    </section>
+    """
+    return _dashboard_shell(title="Autopilot", generated_at=status["generated_at"], body=body, active_path="/autopilot", message=message)
+
+
 def serve_tracker(settings: Settings, host: str | None = None, port: int | None = None) -> None:
     bind_host = host or settings.dashboard_host
     bind_port = port or settings.dashboard_port
@@ -476,6 +791,12 @@ def serve_tracker(settings: Settings, host: str | None = None, port: int | None 
                 payload = render_tracker_html(status).encode("utf-8")
             elif parsed.path == "/manual":
                 payload = render_manual_queue_html(status).encode("utf-8")
+            elif parsed.path == "/onboarding":
+                payload = render_onboarding_html(settings, status).encode("utf-8")
+            elif parsed.path == "/providers":
+                payload = render_provider_html(settings, status).encode("utf-8")
+            elif parsed.path == "/autopilot":
+                payload = render_autopilot_html(settings, status).encode("utf-8")
             elif parsed.path == "/worker":
                 payload = render_worker_html(settings, status).encode("utf-8")
             elif parsed.path == "/search":
@@ -493,21 +814,44 @@ def serve_tracker(settings: Settings, host: str | None = None, port: int | None 
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib callback name
             parsed = urlparse(self.path)
-            if parsed.path != "/action":
+            if parsed.path == "/upload-cv":
+                result = _upload_cv(settings, self)
+                status = tracker_status(settings)
+                message = f"upload-cv: {'ok' if result.get('ok') else 'failed'}\n{result.get('output', '')}".strip()
+                payload = render_onboarding_html(settings, status, message=message).encode("utf-8")
+            elif parsed.path in {"/action", "/onboarding-action", "/provider-action", "/autopilot-action"}:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length).decode("utf-8", errors="replace")
+                form = parse_qs(body)
+                action = (form.get("action") or [""])[0]
+                if parsed.path == "/action":
+                    result = _dashboard_action(settings, action)
+                    active = "/search" if action.startswith("search-") else "/worker"
+                elif parsed.path == "/onboarding-action":
+                    result = _onboarding_action(settings, form)
+                    active = "/onboarding"
+                elif parsed.path == "/provider-action":
+                    result = _provider_action(settings, form)
+                    active = "/providers"
+                else:
+                    result = _autopilot_action(settings, form)
+                    active = "/autopilot"
+                status = tracker_status(settings)
+                message = f"{action}: {'ok' if result.get('ok') else 'failed'}\n{result.get('output', '')}".strip()
+                if active == "/search":
+                    payload = render_search_html(settings, status, message=message).encode("utf-8")
+                elif active == "/worker":
+                    payload = render_worker_html(settings, status, message=message).encode("utf-8")
+                elif active == "/onboarding":
+                    payload = render_onboarding_html(settings, status, message=message).encode("utf-8")
+                elif active == "/providers":
+                    payload = render_provider_html(settings, status, message=message).encode("utf-8")
+                else:
+                    payload = render_autopilot_html(settings, status, message=message).encode("utf-8")
+            else:
                 self.send_response(404)
                 self.end_headers()
                 return
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length).decode("utf-8", errors="replace")
-            action = (parse_qs(body).get("action") or [""])[0]
-            result = _dashboard_action(settings, action)
-            status = tracker_status(settings)
-            message = f"{action}: {'ok' if result.get('ok') else 'failed'}\n{result.get('output', '')}".strip()
-            active = "/search" if action.startswith("search-") else "/worker"
-            if active == "/search":
-                payload = render_search_html(settings, status, message=message).encode("utf-8")
-            else:
-                payload = render_worker_html(settings, status, message=message).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))

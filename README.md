@@ -57,6 +57,33 @@ cp .env.example .env
 chmod 600 .env
 ```
 
+## One-Run GUI Mode
+
+For less technical users, start the local dashboard and helper services with one
+command:
+
+```bash
+scripts/start_gui.sh
+```
+
+Then open `http://127.0.0.1:7860` on the same device. If you are connecting through
+a private tunnel, keep the dashboard bound to loopback on the host and forward it
+privately.
+
+The GUI adds:
+
+- Onboarding: CV upload, preference capture, extracted profile review, and Gmail
+  login instructions.
+- AI Providers: choose local Ollama or opt into GPT, Claude, Gemini, or DeepSeek
+  using environment variables. API keys are never stored by the dashboard.
+- Autopilot: a safe fill-only mode where the AI prepares applications and you press
+  the final Submit button.
+- Worker and Web Search controls for people who do not want to memorize CLI
+  commands.
+
+The original CLI remains the advanced path and all private data still lives under
+ignored `data/` files.
+
 This project was set up for user-local Ollama at `~/.local/bin/ollama`. To start it:
 
 ```bash
@@ -441,12 +468,24 @@ audit record. Use `login-session` first if Gmail is not already logged in.
 
 ## External LLMs
 
-The default advisory model is the local Ollama/Gemma backend. Logging into ChatGPT in
-the browser is not automated by this project because that can send CV and application
-data to an external service and is brittle compared with an explicit API integration.
-If external model review is desired, add it as an opt-in provider with a clear privacy
-warning and environment-based credentials; do not make it part of unattended
-submission.
+The default advisory model is the local Ollama/Gemma backend. The dashboard also has
+an **AI Providers** tab for nontechnical setup of optional GPT, Claude, Gemini, and
+DeepSeek API modes.
+
+Provider choices are saved privately in `data/profiles/llm_providers.json`. API keys
+are read from environment variables only:
+
+```bash
+OPENAI_API_KEY=
+ANTHROPIC_API_KEY=
+GEMINI_API_KEY=
+DEEPSEEK_API_KEY=
+```
+
+Logging into ChatGPT in the browser is not automated by this project because that can
+send CV and application data to an external service and is brittle compared with an
+explicit opt-in API integration. Keep local Ollama selected if you want CV and
+application reasoning to remain local-first.
 
 ## Tracker Dashboard
 
@@ -463,8 +502,15 @@ Run the local-only dashboard:
 .venv/bin/python -m app.main dashboard
 ```
 
-It binds to `127.0.0.1:7860` by default and shows jobs, draft answers, questions,
-verified submission records, unverified submit-click attempts, and worker state. The
+Or use the friendly launcher:
+
+```bash
+scripts/start_gui.sh
+```
+
+It binds to `127.0.0.1:7860` by default and shows jobs, onboarding, AI providers,
+safe fill-only Autopilot, draft answers, questions, verified submission records,
+unverified submit-click attempts, worker controls, and local search controls. The
 generated HTML and all tracker data stay under ignored `data/applications/`.
 
 ## Telegram Notifications
