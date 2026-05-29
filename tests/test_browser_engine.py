@@ -7,6 +7,8 @@ from app.browser_engine import (
     APPLICATION_NAVIGATION_SCRIPT,
     _is_arbeitnow_job_page,
     _choose_application_entry_action,
+    _answer_for_field,
+    _is_resume_file_field,
     _planner_fill,
     _plan_form_fills,
     _post_submit_errors,
@@ -99,6 +101,34 @@ class BrowserEngineHelperTests(unittest.TestCase):
         fills, errors = _plan_form_fills(fields, {}, {"allow_application_terms_checkbox": True})
         self.assertEqual(fills[0]["kind"], "checkbox")
         self.assertEqual(errors, [])
+
+    def test_resume_upload_does_not_target_cover_letter_or_photo(self) -> None:
+        fields = [
+            {"index": 0, "type": "file", "tag": "input", "label": "Photo", "required": False},
+            {"index": 1, "type": "file", "tag": "input", "label": "CV or resume", "required": True},
+            {"index": 2, "type": "file", "tag": "input", "label": "Cover letter", "required": True},
+        ]
+        self.assertFalse(_is_resume_file_field(fields[0]))
+        self.assertTrue(_is_resume_file_field(fields[1]))
+        self.assertFalse(_is_resume_file_field(fields[2]))
+        fills, errors = _plan_form_fills(
+            fields,
+            {},
+            {"block_file_uploads": False, "resume_path": __file__},
+        )
+        self.assertEqual([fill["index"] for fill in fills], [1])
+        self.assertIn("Required non-resume file upload needs manual review: Cover letter", errors)
+
+    def test_citizenship_question_is_not_filled_with_candidate_name(self) -> None:
+        field = {
+            "index": 0,
+            "type": "text",
+            "tag": "input",
+            "label": "Please name all citizenships you have",
+            "name": "candidate.openQuestionAnswers.1.content",
+            "required": True,
+        }
+        self.assertIsNone(_answer_for_field(field, {"name": "Ahmed Elbarbary"}))
 
     def test_required_unknown_fields_still_block_after_planning(self) -> None:
         fields = [
