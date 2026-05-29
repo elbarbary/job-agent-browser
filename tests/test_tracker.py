@@ -12,6 +12,9 @@ from app.tracker import (
     format_tracker_chat,
     format_tracker_text,
     render_tracker_html,
+    render_worker_html,
+    render_search_html,
+    render_manual_queue_html,
     tracker_status,
     write_tracker_html,
 )
@@ -80,6 +83,11 @@ class TrackerTests(unittest.TestCase):
             self.assertIn("Review prepared application", render_tracker_html(status))
             self.assertIn("Manual submit options", render_tracker_html(status))
             self.assertIn("manual queue", render_tracker_html(status))
+            self.assertIn("Worker", render_tracker_html(status))
+            self.assertIn("Web Search", render_tracker_html(status))
+            self.assertIn("Manual submit options", render_manual_queue_html(status))
+            self.assertIn("Worker Control", render_worker_html(settings, status))
+            self.assertIn("Local Web Search", render_search_html(settings, status))
             self.assertIn("Draft answers", render_tracker_html(status))
             self.assertIn("Manual Submit Queue", format_manual_queue(status))
             self.assertIn("--prepare", format_manual_queue(status))
