@@ -289,6 +289,73 @@ def _upload_cv(settings: Settings, handler: BaseHTTPRequestHandler) -> dict[str,
     return {"ok": True, "output": f"Uploaded and extracted CV: {result.source_path}"}
 
 
+def _safe_job_id(job_id: str) -> str:
+    cleaned = job_id.strip()
+    if not cleaned or "/" in cleaned or "\\" in cleaned or cleaned in {".", ".."}:
+        raise ValueError("Invalid job id.")
+    return cleaned
+
+
+def _job_action(settings: Settings, form: dict[str, list[str]]) -> dict[str, Any]:
+    action = (form.get("action") or [""])[0]
+    try:
+        job_id = _safe_job_id((form.get("job_id") or [""])[0])
+    except ValueError as exc:
+        return {"ok": False, "output": str(exc)}
+    note = (form.get("note") or [""])[0].strip()
+    try:
+        job = ApplicationRepository(settings).find_job(job_id)
+    except Exception as exc:  # noqa: BLE001 - dashboard should surface missing private data clearly.
+        return {"ok": False, "output": str(exc)}
+
+    if action == "prepare-job":
+        return _run_command(
+            [str(settings.root / ".venv/bin/python"), "-m", "app.main", "apply", "--job-id", job_id, "--prepare"],
+            cwd=settings.root,
+            timeout=600,
+            input_text="",
+        )
+
+    if action == "mark-submitted":
+        _write_private_json(
+            settings.applications_dir / "submissions" / f"{job_id}.json",
+            {
+                "submitted_at": datetime.now(UTC).isoformat(),
+                "source": "manual_dashboard_status_edit",
+                "job_id": job_id,
+                "title": job.get("title"),
+                "company": job.get("company"),
+                "url": job.get("url"),
+                "note": note,
+            },
+        )
+        (settings.applications_dir / "status_overrides" / f"{job_id}.json").unlink(missing_ok=True)
+        return {"ok": True, "output": f"Marked {job_id} as submitted."}
+
+    if action == "clear-submitted":
+        (settings.applications_dir / "submissions" / f"{job_id}.json").unlink(missing_ok=True)
+        return {"ok": True, "output": f"Cleared submitted status for {job_id}."}
+
+    if action == "skip-job":
+        _write_private_json(
+            settings.applications_dir / "status_overrides" / f"{job_id}.json",
+            {
+                "status": "skipped",
+                "updated_at": datetime.now(UTC).isoformat(),
+                "source": "manual_dashboard_status_edit",
+                "job_id": job_id,
+                "note": note,
+            },
+        )
+        return {"ok": True, "output": f"Marked {job_id} as skipped."}
+
+    if action == "reopen-job":
+        (settings.applications_dir / "status_overrides" / f"{job_id}.json").unlink(missing_ok=True)
+        return {"ok": True, "output": f"Reopened {job_id}."}
+
+    return {"ok": False, "output": f"Unknown job action: {action}"}
+
+
 def tracker_status(settings: Settings) -> dict[str, Any]:
     settings.ensure_directories()
     jobs = ApplicationRepository(settings).load_jobs()
@@ -297,6 +364,7 @@ def tracker_status(settings: Settings) -> dict[str, Any]:
     submissions = _read_json_dir(settings.applications_dir / "submissions")
     attempts = _read_json_dir(settings.applications_dir / "submission_attempts")
     approvals = _read_json_dir(settings.applications_dir / "approvals")
+    status_overrides = _read_json_dir(settings.applications_dir / "status_overrides")
     worker_status = _read_json(settings.applications_dir / "worker_status.json", {})
 
     rows: list[dict[str, Any]] = []
@@ -309,6 +377,8 @@ def tracker_status(settings: Settings) -> dict[str, Any]:
             state = "prepared_manual_submit"
         elif job_id in attempts:
             state = "unverified_submit_click"
+        elif (status_overrides.get(job_id) or {}).get("status") == "skipped":
+            state = "skipped"
         elif job_id in drafts:
             state = "drafted"
         else:
@@ -334,6 +404,7 @@ def tracker_status(settings: Settings) -> dict[str, Any]:
                 "submission": submissions.get(job_id),
                 "submission_attempt": attempts.get(job_id),
                 "approval": approvals.get(job_id),
+                "status_override": status_overrides.get(job_id),
             }
         )
 
@@ -347,6 +418,7 @@ def tracker_status(settings: Settings) -> dict[str, Any]:
             "submitted": len(submissions),
             "unverified_submit_clicks": len(attempts),
             "approvals": len(approvals),
+            "skipped": sum(1 for row in rows if row["state"] == "skipped"),
         },
         "worker_status": worker_status,
         "jobs": rows,
@@ -495,6 +567,7 @@ def _summary_cards(counts: dict[str, Any]) -> str:
     <div class="card"><strong>{counts['submitted']}</strong><br>submitted</div>
     <div class="card"><strong>{counts['unverified_submit_clicks']}</strong><br>unverified clicks</div>
     <div class="card"><strong>{counts['approvals']}</strong><br>approvals</div>
+    <div class="card"><strong>{counts.get('skipped', 0)}</strong><br>skipped</div>
   </section>
 """
 
@@ -517,18 +590,46 @@ def _job_article(job: dict[str, Any]) -> str:
     attempted_at = html.escape(str(attempt.get("attempted_at", "")))
     job_id = html.escape(str(job["id"]))
     job_url = html.escape(str(job.get("url") or ""))
+    prepare_button = ""
+    if job.get("state") == "drafted":
+        prepare_button = f"""
+            <form method="post" action="/job-action">
+              <input type="hidden" name="job_id" value="{job_id}">
+              <button name="action" value="prepare-job">Prepare/fill this application</button>
+            </form>
+        """
+    review_button = (
+        f'<p><a class="review" href="{review_url}">Review prepared application and press Submit</a></p>'
+        if review_url
+        else ""
+    )
     manual_actions = ""
     if job.get("manual_submit_ready"):
         manual_actions = f"""
           <section class="manual-actions">
             <strong>Manual submit options</strong>
             <p><a class="review secondary" href="{job_url}">Open original application page</a></p>
-            <p>To try pre-filling in the remote challenge browser:</p>
+            {review_button}
+            {prepare_button}
+            <p>CLI fallback for pre-filling in the remote challenge browser:</p>
             <code>.venv/bin/python -m app.main apply --job-id {job_id} --prepare</code>
             <p>To open a final manual review session from the CLI:</p>
             <code>.venv/bin/python -m app.main apply --job-id {job_id} --confirm</code>
           </section>
         """
+    status_controls = f"""
+          <section class="manual-actions">
+            <strong>Edit local status</strong>
+            <form method="post" action="/job-action">
+              <input type="hidden" name="job_id" value="{job_id}">
+              <input name="note" placeholder="Optional note, e.g. submitted on company site">
+              <button name="action" value="mark-submitted">Mark submitted</button>
+              <button class="secondary" name="action" value="clear-submitted">Clear submitted</button>
+              <button class="secondary" name="action" value="reopen-job">Reopen</button>
+              <button class="danger" name="action" value="skip-job">Skip</button>
+            </form>
+          </section>
+    """
     return f"""
         <article class="job {html.escape(job['state'])}">
           <header>
@@ -541,8 +642,8 @@ def _job_article(job: dict[str, Any]) -> str:
           <p>{html.escape(str(job.get('location') or ''))}</p>
           <p>{'Submitted at: ' + submitted_at if submitted_at else ''}</p>
           <p>{'Prepared at: ' + prepared_at if prepared_at else ''}</p>
-          <p>{'<a class="review" href="' + review_url + '">Review prepared application and press Submit</a>' if review_url else ''}</p>
           {manual_actions}
+          {status_controls}
           <p>{'Prepared screenshot: ' + screenshot_path if screenshot_path else ''}</p>
           <p>{'Unverified click at: ' + attempted_at if attempted_at else ''}</p>
           <details>
@@ -572,11 +673,17 @@ def write_tracker_html(settings: Settings) -> Path:
     return path
 
 
-def render_manual_queue_html(status: dict[str, Any]) -> str:
+def render_manual_queue_html(status: dict[str, Any], *, message: str = "") -> str:
     jobs = [job for job in status["jobs"] if job.get("manual_submit_ready")]
     rows = "\n".join(_job_article(job) for job in jobs) or "<p>No drafted/prepared jobs are waiting for manual submission.</p>"
     body = _summary_cards(status["counts"]) + f"<h2>Manual Submit Queue</h2><p>{len(jobs)} jobs ready for you to review manually.</p>{rows}"
-    return _dashboard_shell(title="Manual Submit Queue", generated_at=status["generated_at"], body=body, active_path="/manual")
+    return _dashboard_shell(
+        title="Manual Submit Queue",
+        generated_at=status["generated_at"],
+        body=body,
+        active_path="/manual",
+        message=message,
+    )
 
 
 def render_worker_html(settings: Settings, status: dict[str, Any], *, message: str = "") -> str:
@@ -819,7 +926,7 @@ def serve_tracker(settings: Settings, host: str | None = None, port: int | None 
                 status = tracker_status(settings)
                 message = f"upload-cv: {'ok' if result.get('ok') else 'failed'}\n{result.get('output', '')}".strip()
                 payload = render_onboarding_html(settings, status, message=message).encode("utf-8")
-            elif parsed.path in {"/action", "/onboarding-action", "/provider-action", "/autopilot-action"}:
+            elif parsed.path in {"/action", "/job-action", "/onboarding-action", "/provider-action", "/autopilot-action"}:
                 length = int(self.headers.get("Content-Length", "0"))
                 body = self.rfile.read(length).decode("utf-8", errors="replace")
                 form = parse_qs(body)
@@ -827,6 +934,9 @@ def serve_tracker(settings: Settings, host: str | None = None, port: int | None 
                 if parsed.path == "/action":
                     result = _dashboard_action(settings, action)
                     active = "/search" if action.startswith("search-") else "/worker"
+                elif parsed.path == "/job-action":
+                    result = _job_action(settings, form)
+                    active = "/manual"
                 elif parsed.path == "/onboarding-action":
                     result = _onboarding_action(settings, form)
                     active = "/onboarding"
@@ -842,6 +952,8 @@ def serve_tracker(settings: Settings, host: str | None = None, port: int | None 
                     payload = render_search_html(settings, status, message=message).encode("utf-8")
                 elif active == "/worker":
                     payload = render_worker_html(settings, status, message=message).encode("utf-8")
+                elif active == "/manual":
+                    payload = render_manual_queue_html(status, message=message).encode("utf-8")
                 elif active == "/onboarding":
                     payload = render_onboarding_html(settings, status, message=message).encode("utf-8")
                 elif active == "/providers":
