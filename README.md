@@ -477,15 +477,23 @@ are read from environment variables only:
 
 ```bash
 OPENAI_API_KEY=
+OPENAI_MODEL=
 ANTHROPIC_API_KEY=
+ANTHROPIC_MODEL=
 GEMINI_API_KEY=
+GEMINI_MODEL=
 DEEPSEEK_API_KEY=
+DEEPSEEK_MODEL=
 ```
 
 Logging into ChatGPT in the browser is not automated by this project because that can
 send CV and application data to an external service and is brittle compared with an
 explicit opt-in API integration. Keep local Ollama selected if you want CV and
 application reasoning to remain local-first.
+
+When a non-local provider is selected, LLM prompts used for job advisory or form
+planning are sent to that provider. Application submissions remain governed by the
+same WebABI/policy checks.
 
 ## Tracker Dashboard
 
