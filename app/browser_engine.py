@@ -1362,6 +1362,9 @@ def _link_for(answers: dict[str, Any], needle: str) -> str | None:
 def _answer_for_field(field: dict[str, Any], answers: dict[str, Any]) -> str | None:
     text = _field_text(field)
     first_name, last_name = _split_name(answers.get("name"))
+    for key, value in (answers.get("application_default_answers") or {}).items():
+        if str(key).casefold() in text and is_known(value):
+            return str(value)
     if any(word in text for word in ("citizenship", "citizenships", "nationality", "nationalities", "passport")):
         return str(answers["nationality"]) if is_known(answers.get("nationality")) else None
     if "first" in text and first_name:
@@ -1389,6 +1392,14 @@ def _answer_for_field(field: dict[str, Any], answers: dict[str, Any]) -> str | N
         return str(answers["availability"]) if is_known(answers.get("availability")) else None
     if any(word in text for word in ("salary", "compensation", "pay expectation")):
         return str(answers["salary_expectation"]) if is_known(answers.get("salary_expectation")) else None
+    if "relocation" in text:
+        return str(answers["relocation"]) if is_known(answers.get("relocation")) else None
+    if any(word in text for word in ("english", "german", "language")):
+        language_proficiency = answers.get("language_proficiency") or {}
+        if isinstance(language_proficiency, dict):
+            for language, level in language_proficiency.items():
+                if str(language).casefold() in text and is_known(level):
+                    return str(level)
     return None
 
 
@@ -1409,10 +1420,20 @@ def _known_answer_values(answers: dict[str, Any], config: dict[str, Any]) -> dic
         "work_authorization": answers.get("work_authorization"),
         "availability": answers.get("availability"),
         "salary_expectation": answers.get("salary_expectation"),
+        "nationality": answers.get("nationality"),
+        "relocation": answers.get("relocation"),
     }
+    for key, value in (answers.get("application_default_answers") or {}).items():
+        if is_known(value):
+            values[f"default:{key}"] = value
     resume_path = Path(str(config.get("resume_path") or "")).expanduser()
     if not config.get("block_file_uploads", True) and resume_path.exists():
         values["resume_file"] = str(resume_path.resolve())
+    raw_cover_letter_path = answers.get("cover_letter_path")
+    if is_known(raw_cover_letter_path):
+        cover_letter_path = Path(str(raw_cover_letter_path)).expanduser()
+        if not config.get("block_file_uploads", True) and cover_letter_path.exists():
+            values["cover_letter_file"] = str(cover_letter_path.resolve())
     if config.get("allow_application_terms_checkbox") is True:
         values["application_terms_checkbox"] = True
     return {key: value for key, value in values.items() if is_known(value)}
@@ -1534,6 +1555,10 @@ def _planner_fill(
         if field_type != "file" or not _is_resume_file_field(field):
             return None
         return {"index": field_index, "label": label, "value": str(value), "kind": "file"}
+    if answer_key == "cover_letter_file":
+        if field_type != "file" or not _is_cover_letter_file_field(field):
+            return None
+        return {"index": field_index, "label": label, "value": str(value), "kind": "file"}
     if answer_key == "application_terms_checkbox":
         if field_type not in {"checkbox", "radio"} or not _is_application_terms_field(field):
             return None
@@ -1568,6 +1593,11 @@ def _is_application_terms_field(field: dict[str, Any]) -> bool:
 def _is_resume_file_field(field: dict[str, Any]) -> bool:
     text = _field_text(field)
     return any(word in text for word in ("resume", "résumé", "cv", "curriculum vitae"))
+
+
+def _is_cover_letter_file_field(field: dict[str, Any]) -> bool:
+    text = _field_text(field)
+    return "cover letter" in text
 
 
 def _merge_fills(primary: list[dict[str, Any]], secondary: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1639,8 +1669,19 @@ def _plan_form_fills(
         required = bool(field.get("required"))
         if field_type == "file":
             resume_path = Path(str(config.get("resume_path") or "")).expanduser()
+            raw_cover_letter_path = answers.get("cover_letter_path")
+            cover_letter_path = Path(str(raw_cover_letter_path)).expanduser() if is_known(raw_cover_letter_path) else None
             if not _is_resume_file_field(field):
-                if required:
+                if _is_cover_letter_file_field(field) and not config.get("block_file_uploads", True) and cover_letter_path and cover_letter_path.exists():
+                    fills.append(
+                        {
+                            "index": int(field["index"]),
+                            "label": label,
+                            "value": str(cover_letter_path.resolve()),
+                            "kind": "file",
+                        }
+                    )
+                elif required:
                     errors.append(f"Required non-resume file upload needs manual review: {label}")
             elif config.get("block_file_uploads", True) or not resume_path.exists():
                 errors.append(f"File upload field blocked: {label}")

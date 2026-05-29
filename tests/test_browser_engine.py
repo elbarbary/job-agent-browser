@@ -8,6 +8,7 @@ from app.browser_engine import (
     _is_arbeitnow_job_page,
     _choose_application_entry_action,
     _answer_for_field,
+    _is_cover_letter_file_field,
     _is_resume_file_field,
     _planner_fill,
     _plan_form_fills,
@@ -111,6 +112,7 @@ class BrowserEngineHelperTests(unittest.TestCase):
         self.assertFalse(_is_resume_file_field(fields[0]))
         self.assertTrue(_is_resume_file_field(fields[1]))
         self.assertFalse(_is_resume_file_field(fields[2]))
+        self.assertTrue(_is_cover_letter_file_field(fields[2]))
         fills, errors = _plan_form_fills(
             fields,
             {},
@@ -118,6 +120,18 @@ class BrowserEngineHelperTests(unittest.TestCase):
         )
         self.assertEqual([fill["index"] for fill in fills], [1])
         self.assertIn("Required non-resume file upload needs manual review: Cover letter", errors)
+
+    def test_confirmed_cover_letter_path_can_fill_cover_letter_upload(self) -> None:
+        fields = [
+            {"index": 0, "type": "file", "tag": "input", "label": "Cover letter", "required": True},
+        ]
+        fills, errors = _plan_form_fills(
+            fields,
+            {"cover_letter_path": __file__},
+            {"block_file_uploads": False, "resume_path": __file__},
+        )
+        self.assertEqual([fill["index"] for fill in fills], [0])
+        self.assertEqual(errors, [])
 
     def test_citizenship_question_is_not_filled_with_candidate_name(self) -> None:
         field = {
@@ -129,6 +143,25 @@ class BrowserEngineHelperTests(unittest.TestCase):
             "required": True,
         }
         self.assertIsNone(_answer_for_field(field, {"name": "Ahmed Elbarbary"}))
+
+    def test_confirmed_defaults_can_fill_targeted_questions(self) -> None:
+        salary_field = {
+            "index": 0,
+            "type": "text",
+            "tag": "input",
+            "label": "Desired annual salary incl. all allowances",
+            "required": True,
+        }
+        self.assertEqual(
+            _answer_for_field(
+                salary_field,
+                {
+                    "salary_expectation": "90000 EUR",
+                    "application_default_answers": {"desired annual salary": "90000 EUR"},
+                },
+            ),
+            "90000 EUR",
+        )
 
     def test_required_unknown_fields_still_block_after_planning(self) -> None:
         fields = [

@@ -65,6 +65,28 @@ def _split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _parse_key_value_lines(value: str) -> dict[str, str]:
+    items: dict[str, str] = {}
+    for raw_line in value.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, answer = line.split("=", 1)
+        key = key.strip()
+        answer = answer.strip()
+        if key and answer:
+            items[key] = answer
+    return items
+
+
+def _format_key_value_lines(values: Any) -> str:
+    if not isinstance(values, dict):
+        return ""
+    return "\n".join(f"{key} = {value}" for key, value in values.items())
+
+
 def _gui_settings_path(settings: Settings) -> Path:
     return settings.profile_dir / "gui_settings.json"
 
@@ -206,12 +228,36 @@ def _save_preferences_from_form(settings: Settings, form: dict[str, list[str]]) 
     if remote_preference:
         preferences["remote_preference"] = remote_preference
     facts = dict(preferences.get("candidate_user_confirmed_facts") or {})
-    for key in ("salary_target", "work_authorization_summary", "availability", "relocation"):
+    for key in (
+        "salary_target",
+        "work_authorization_summary",
+        "availability",
+        "relocation",
+        "nationality",
+        "home_country",
+        "cover_letter_path",
+    ):
         value = (form.get(key) or [""])[0].strip()
         if value:
             facts[key] = value
         else:
             facts.pop(key, None)
+    needs_sponsorship = (form.get("needs_work_sponsorship_outside_home_country") or [""])[0]
+    if needs_sponsorship in {"true", "false"}:
+        facts["needs_work_sponsorship_outside_home_country"] = needs_sponsorship == "true"
+    language_proficiency = dict(facts.get("language_proficiency") or {})
+    for key in ("english", "german"):
+        value = (form.get(f"language_{key}") or [""])[0].strip()
+        if value:
+            language_proficiency[key] = value
+        else:
+            language_proficiency.pop(key, None)
+    facts["language_proficiency"] = language_proficiency
+    default_answers = _parse_key_value_lines((form.get("application_default_answers") or [""])[0])
+    if default_answers:
+        facts["application_default_answers"] = default_answers
+    else:
+        facts.pop("application_default_answers", None)
     preferences["candidate_user_confirmed_facts"] = facts
     _write_private_json(settings.profile_dir / "job_preferences.json", preferences)
     return {"ok": True, "output": "Saved private job preferences."}
@@ -349,6 +395,19 @@ def _job_action(settings: Settings, form: dict[str, list[str]]) -> dict[str, Any
         )
         return {"ok": True, "output": f"Marked {job_id} as skipped."}
 
+    if action == "mark-broken-link":
+        _write_private_json(
+            settings.applications_dir / "status_overrides" / f"{job_id}.json",
+            {
+                "status": "broken_link",
+                "updated_at": datetime.now(UTC).isoformat(),
+                "source": "manual_dashboard_status_edit",
+                "job_id": job_id,
+                "note": note,
+            },
+        )
+        return {"ok": True, "output": f"Marked {job_id} as broken link."}
+
     if action == "reopen-job":
         (settings.applications_dir / "status_overrides" / f"{job_id}.json").unlink(missing_ok=True)
         return {"ok": True, "output": f"Reopened {job_id}."}
@@ -377,8 +436,8 @@ def tracker_status(settings: Settings) -> dict[str, Any]:
             state = "prepared_manual_submit"
         elif job_id in attempts:
             state = "unverified_submit_click"
-        elif (status_overrides.get(job_id) or {}).get("status") == "skipped":
-            state = "skipped"
+        elif (status_overrides.get(job_id) or {}).get("status") in {"skipped", "broken_link"}:
+            state = str((status_overrides.get(job_id) or {}).get("status"))
         elif job_id in drafts:
             state = "drafted"
         else:
@@ -419,6 +478,7 @@ def tracker_status(settings: Settings) -> dict[str, Any]:
             "unverified_submit_clicks": len(attempts),
             "approvals": len(approvals),
             "skipped": sum(1 for row in rows if row["state"] == "skipped"),
+            "broken_links": sum(1 for row in rows if row["state"] == "broken_link"),
         },
         "worker_status": worker_status,
         "jobs": rows,
@@ -536,7 +596,7 @@ def _dashboard_shell(
     .review, button {{ display: inline-block; margin: 6px 8px 6px 0; border-radius: 999px; padding: 8px 12px; background: #1d4ed8; color: white; border: 0; text-decoration: none; cursor: pointer; }}
     .review.secondary, button.secondary {{ background: #5b3fd6; }}
     button.danger {{ background: #b91c1c; }}
-    input[type="search"], input[type="text"], input:not([type]), select {{ width: min(680px, 100%); padding: 10px 12px; border-radius: 12px; border: 1px solid #d5c8b5; }}
+    input[type="search"], input[type="text"], input:not([type]), select, textarea {{ width: min(680px, 100%); padding: 10px 12px; border-radius: 12px; border: 1px solid #d5c8b5; }}
     a {{ color: #5b3fd6; word-break: break-word; }}
     table {{ border-collapse: collapse; width: 100%; margin-top: 10px; }}
     th, td {{ border-top: 1px solid #eadfce; text-align: left; padding: 8px; vertical-align: top; }}
@@ -568,6 +628,7 @@ def _summary_cards(counts: dict[str, Any]) -> str:
     <div class="card"><strong>{counts['unverified_submit_clicks']}</strong><br>unverified clicks</div>
     <div class="card"><strong>{counts['approvals']}</strong><br>approvals</div>
     <div class="card"><strong>{counts.get('skipped', 0)}</strong><br>skipped</div>
+    <div class="card"><strong>{counts.get('broken_links', 0)}</strong><br>broken links</div>
   </section>
 """
 
@@ -626,6 +687,7 @@ def _job_article(job: dict[str, Any]) -> str:
               <button name="action" value="mark-submitted">Mark submitted</button>
               <button class="secondary" name="action" value="clear-submitted">Clear submitted</button>
               <button class="secondary" name="action" value="reopen-job">Reopen</button>
+              <button class="secondary" name="action" value="mark-broken-link">Broken link</button>
               <button class="danger" name="action" value="skip-job">Skip</button>
             </form>
           </section>
@@ -762,6 +824,17 @@ def render_onboarding_html(settings: Settings, status: dict[str, Any], *, messag
     roles = ", ".join(preferences.get("target_roles") or [])
     locations = ", ".join(preferences.get("target_locations") or [])
     facts = preferences.get("candidate_user_confirmed_facts") or {}
+    language_proficiency = facts.get("language_proficiency") or {}
+    default_answers_text = html.escape(_format_key_value_lines(facts.get("application_default_answers") or {}))
+    sponsorship_value = facts.get("needs_work_sponsorship_outside_home_country")
+    sponsorship_options = "".join(
+        f'<option value="{value}" {"selected" if selected else ""}>{label}</option>'
+        for value, label, selected in (
+            ("", "needs_user_answer", sponsorship_value not in {True, False}),
+            ("true", "Yes", sponsorship_value is True),
+            ("false", "No", sponsorship_value is False),
+        )
+    )
     profile_preview = html.escape(json.dumps(_read_json(profile_path, {}), indent=2, ensure_ascii=True)[:9000])
     review_preview = html.escape(review_path.read_text(encoding="utf-8")[:9000]) if review_path.exists() else ""
     body = _summary_cards(status["counts"]) + f"""
@@ -794,8 +867,18 @@ def render_onboarding_html(settings: Settings, status: dict[str, Any], *, messag
         <label>Remote preference<br><input name="remote_preference" value="{html.escape(str(preferences.get('remote_preference') or ''))}" placeholder="remote, hybrid, onsite"></label><br><br>
         <label>Target salary / compensation notes<br><input name="salary_target" value="{html.escape(str(facts.get('salary_target') or ''))}" placeholder="User-confirmed only"></label><br><br>
         <label>Work authorization / sponsorship notes<br><input name="work_authorization_summary" value="{html.escape(str(facts.get('work_authorization_summary') or ''))}" placeholder="User-confirmed only"></label><br><br>
+        <label>Nationality / citizenships<br><input name="nationality" value="{html.escape(str(facts.get('nationality') or ''))}" placeholder="e.g. Egyptian"></label><br><br>
+        <label>Home country<br><input name="home_country" value="{html.escape(str(facts.get('home_country') or ''))}" placeholder="e.g. Egypt"></label><br><br>
+        <label>Need sponsorship outside home country?<br><select name="needs_work_sponsorship_outside_home_country">{sponsorship_options}</select></label><br><br>
         <label>Availability<br><input name="availability" value="{html.escape(str(facts.get('availability') or ''))}" placeholder="immediately, after graduation, etc."></label><br><br>
         <label>Relocation preference<br><input name="relocation" value="{html.escape(str(facts.get('relocation') or ''))}" placeholder="open to relocate, remote only, etc."></label><br><br>
+        <label>English level<br><input name="language_english" value="{html.escape(str(language_proficiency.get('english') or ''))}" placeholder="e.g. Fluent / C1"></label><br><br>
+        <label>German level<br><input name="language_german" value="{html.escape(str(language_proficiency.get('german') or ''))}" placeholder="e.g. A1 / beginner / not fluent"></label><br><br>
+        <label>Cover letter file path<br><input name="cover_letter_path" value="{html.escape(str(facts.get('cover_letter_path') or ''))}" placeholder="/absolute/path/to/cover-letter.pdf"></label><br><br>
+        <label>Extra default answers<br>
+          <textarea name="application_default_answers" rows="7" placeholder="question keyword = answer">{default_answers_text}</textarea>
+        </label>
+        <p>Use extra defaults only for facts or preferences you personally confirm, for example <code>desired annual salary = 90000 EUR</code>. The agent matches the left side against form labels.</p>
         <button type="submit">Save private preferences</button>
       </form>
     </section>

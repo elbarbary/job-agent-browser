@@ -45,6 +45,13 @@ DEFAULT_USER_PREFERENCES: dict[str, Any] = {
         "needs_work_sponsorship_outside_home_country": "needs_user_answer",
         "salary_target": "needs_user_answer",
         "availability": "needs_user_answer",
+        "relocation": "needs_user_answer",
+        "language_proficiency": {
+            "english": "needs_user_answer",
+            "german": "needs_user_answer",
+        },
+        "cover_letter_path": "needs_user_answer",
+        "application_default_answers": {},
         "eligible_role_types": [],
         "target_product_roles": "needs_user_answer",
     },

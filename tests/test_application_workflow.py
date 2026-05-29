@@ -41,6 +41,13 @@ class ApplicationWorkflowTests(unittest.TestCase):
                     "work_authorization_summary": "User-confirmed work authorization answer.",
                     "availability": "User-confirmed availability.",
                     "salary_target": "needs_user_answer",
+                    "nationality": "Exampleland",
+                    "relocation": "Open to relocate.",
+                    "language_proficiency": {"english": "Fluent"},
+                    "cover_letter_path": "/tmp/cover-letter.pdf",
+                    "application_default_answers": {
+                        "desired annual salary": "90000 EUR",
+                    },
                 }
             }
             (settings.profile_dir / "job_preferences.json").write_text(
@@ -71,6 +78,14 @@ class ApplicationWorkflowTests(unittest.TestCase):
                 "User-confirmed work authorization answer.",
             )
             self.assertEqual(draft["answers"]["availability"], "User-confirmed availability.")
+            self.assertEqual(draft["answers"]["nationality"], "Exampleland")
+            self.assertEqual(draft["answers"]["relocation"], "Open to relocate.")
+            self.assertEqual(draft["answers"]["language_proficiency"]["english"], "Fluent")
+            self.assertEqual(draft["answers"]["cover_letter_path"], "/tmp/cover-letter.pdf")
+            self.assertEqual(
+                draft["answers"]["application_default_answers"]["desired annual salary"],
+                "90000 EUR",
+            )
             self.assertEqual(
                 draft["required_user_answers"],
                 ["needs_user_answer: desired salary or salary history is not stated in the CV."],

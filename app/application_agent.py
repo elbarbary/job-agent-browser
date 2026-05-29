@@ -231,6 +231,29 @@ def _apply_user_confirmed_facts(answers: dict[str, Any], facts: dict[str, Any]) 
     if availability:
         answers["availability"] = availability
     answers["salary_expectation"] = _known_fact(facts.get("salary_target")) or "needs_user_answer"
+    nationality = _known_fact(facts.get("nationality"))
+    if nationality:
+        answers["nationality"] = nationality
+    relocation = _known_fact(facts.get("relocation"))
+    if relocation:
+        answers["relocation"] = relocation
+    language_proficiency = facts.get("language_proficiency")
+    if isinstance(language_proficiency, dict):
+        answers["language_proficiency"] = {
+            str(key).casefold(): value
+            for key, value in language_proficiency.items()
+            if _known_fact(value)
+        }
+    cover_letter_path = _known_fact(facts.get("cover_letter_path"))
+    if cover_letter_path:
+        answers["cover_letter_path"] = cover_letter_path
+    default_answers = facts.get("application_default_answers")
+    if isinstance(default_answers, dict):
+        answers["application_default_answers"] = {
+            str(key): str(value)
+            for key, value in default_answers.items()
+            if _known_fact(value)
+        }
 
 
 def _remaining_user_answers(uncertainties: list[str], answers: dict[str, Any]) -> list[str]:
