@@ -7,7 +7,14 @@ from pathlib import Path
 
 from app.application_agent import ApplicationRepository
 from app.config import Settings
-from app.tracker import format_tracker_chat, format_tracker_text, render_tracker_html, tracker_status, write_tracker_html
+from app.tracker import (
+    format_manual_queue,
+    format_tracker_chat,
+    format_tracker_text,
+    render_tracker_html,
+    tracker_status,
+    write_tracker_html,
+)
 
 
 class TrackerTests(unittest.TestCase):
@@ -62,15 +69,20 @@ class TrackerTests(unittest.TestCase):
             self.assertEqual(status["counts"]["jobs"], 2)
             self.assertEqual(status["counts"]["drafts"], 1)
             self.assertEqual(status["counts"]["prepared"], 1)
+            self.assertEqual(status["counts"]["manual_submit_queue"], 1)
             self.assertEqual(status["counts"]["submitted"], 1)
             self.assertEqual(status["counts"]["unverified_submit_clicks"], 1)
             self.assertEqual(status["jobs"][0]["state"], "submitted")
             self.assertEqual(status["jobs"][1]["state"], "prepared_manual_submit")
             self.assertIn("Product Engineer", format_tracker_text(status))
-            self.assertIn("Prepared:", format_tracker_chat(status))
+            self.assertIn("Manual queue:", format_tracker_chat(status))
             self.assertIn("Submitted:", format_tracker_chat(status))
             self.assertIn("Review prepared application", render_tracker_html(status))
+            self.assertIn("Manual submit options", render_tracker_html(status))
+            self.assertIn("manual queue", render_tracker_html(status))
             self.assertIn("Draft answers", render_tracker_html(status))
+            self.assertIn("Manual Submit Queue", format_manual_queue(status))
+            self.assertIn("--prepare", format_manual_queue(status))
             self.assertEqual(write_tracker_html(settings).stat().st_mode & 0o777, 0o600)
 
 

@@ -55,10 +55,12 @@ def tracker_status(settings: Settings) -> dict[str, Any]:
             state = "drafted"
         else:
             state = "found"
+        manual_submit_ready = state in {"drafted", "prepared_manual_submit"}
         rows.append(
             {
                 "id": job_id,
                 "state": state,
+                "manual_submit_ready": manual_submit_ready,
                 "score": int(job.get("match_score", 0)),
                 "title": job.get("title", ""),
                 "company": job.get("company", ""),
@@ -83,6 +85,7 @@ def tracker_status(settings: Settings) -> dict[str, Any]:
             "jobs": len(jobs),
             "drafts": len(drafts),
             "prepared": len(prepared),
+            "manual_submit_queue": sum(1 for row in rows if row["manual_submit_ready"]),
             "submitted": len(submissions),
             "unverified_submit_clicks": len(attempts),
             "approvals": len(approvals),
@@ -101,6 +104,7 @@ def format_tracker_text(status: dict[str, Any]) -> str:
         f"Jobs known: {counts['jobs']}",
         f"Drafts: {counts['drafts']}",
         f"Prepared for manual submit: {counts['prepared']}",
+        f"Manual submit queue: {counts['manual_submit_queue']}",
         f"Submitted: {counts['submitted']}",
         f"Unverified submit-clicks: {counts['unverified_submit_clicks']}",
         f"Approvals: {counts['approvals']}",
@@ -127,6 +131,7 @@ def format_tracker_chat(status: dict[str, Any]) -> str:
         (
             f"Jobs: {counts['jobs']} | Drafts: {counts['drafts']} | "
             f"Prepared: {counts['prepared']} | Submitted: {counts['submitted']} | "
+            f"Manual queue: {counts['manual_submit_queue']} | "
             f"Unverified clicks: {counts['unverified_submit_clicks']}"
         ),
     ]
@@ -141,9 +146,14 @@ def format_tracker_chat(status: dict[str, Any]) -> str:
             lines.append(f"- {job['title']} at {job['company']}")
     if drafted:
         lines.append("")
-        lines.append("Drafted / pending:")
+        lines.append("Manual submit queue:")
         for job in drafted[:5]:
             lines.append(f"- {job['title']} at {job['company']} (score {job['score']})")
+    if prepared:
+        lines.append("")
+        lines.append("Prepared for your final submit:")
+        for job in prepared[:5]:
+            lines.append(f"- {job['title']} at {job['company']}")
     if attempts:
         lines.append("")
         lines.append("Unverified submit-clicks:")
@@ -176,6 +186,20 @@ def render_tracker_html(status: dict[str, Any]) -> str:
         screenshot_path = html.escape(str((prepared.get("result") or {}).get("screenshot_path") or ""))
         submitted_at = html.escape(str(submission.get("submitted_at", "")))
         attempted_at = html.escape(str(attempt.get("attempted_at", "")))
+        job_id = html.escape(str(job["id"]))
+        job_url = html.escape(str(job.get("url") or ""))
+        manual_actions = ""
+        if job.get("manual_submit_ready"):
+            manual_actions = f"""
+              <section class="manual-actions">
+                <strong>Manual submit options</strong>
+                <p><a class="review secondary" href="{job_url}">Open original application page</a></p>
+                <p>To try pre-filling in the remote challenge browser:</p>
+                <code>.venv/bin/python -m app.main apply --job-id {job_id} --prepare</code>
+                <p>To open a final manual review session from the CLI:</p>
+                <code>.venv/bin/python -m app.main apply --job-id {job_id} --confirm</code>
+              </section>
+            """
         rows.append(
             f"""
             <article class="job {html.escape(job['state'])}">
@@ -190,6 +214,7 @@ def render_tracker_html(status: dict[str, Any]) -> str:
               <p>{'Submitted at: ' + submitted_at if submitted_at else ''}</p>
               <p>{'Prepared at: ' + prepared_at if prepared_at else ''}</p>
               <p>{'<a class="review" href="' + review_url + '">Review prepared application and press Submit</a>' if review_url else ''}</p>
+              {manual_actions}
               <p>{'Prepared screenshot: ' + screenshot_path if screenshot_path else ''}</p>
               <p>{'Unverified click at: ' + attempted_at if attempted_at else ''}</p>
               <details>
@@ -221,7 +246,9 @@ def render_tracker_html(status: dict[str, Any]) -> str:
     .submitted .pill {{ background: #d8f3dc; }}
     .prepared_manual_submit .pill {{ background: #dbeafe; }}
     .drafted .pill {{ background: #fff3bf; }}
+    .manual-actions {{ margin-top: 12px; padding: 12px; border-radius: 12px; background: #f1ecff; }}
     .review {{ display: inline-block; margin-top: 6px; border-radius: 999px; padding: 8px 12px; background: #1d4ed8; color: white; text-decoration: none; }}
+    .review.secondary {{ background: #5b3fd6; }}
     a {{ color: #5b3fd6; word-break: break-word; }}
     table {{ border-collapse: collapse; width: 100%; margin-top: 10px; }}
     th, td {{ border-top: 1px solid #eadfce; text-align: left; padding: 8px; vertical-align: top; }}
@@ -237,6 +264,7 @@ def render_tracker_html(status: dict[str, Any]) -> str:
     <div class="card"><strong>{counts['jobs']}</strong><br>jobs</div>
     <div class="card"><strong>{counts['drafts']}</strong><br>drafts</div>
     <div class="card"><strong>{counts['prepared']}</strong><br>ready for you</div>
+    <div class="card"><strong>{counts['manual_submit_queue']}</strong><br>manual queue</div>
     <div class="card"><strong>{counts['submitted']}</strong><br>submitted</div>
     <div class="card"><strong>{counts['unverified_submit_clicks']}</strong><br>unverified clicks</div>
     <div class="card"><strong>{counts['approvals']}</strong><br>approvals</div>
@@ -281,8 +309,31 @@ def serve_tracker(settings: Settings, host: str | None = None, port: int | None 
     server = ThreadingHTTPServer((bind_host, bind_port), Handler)
     print(f"Tracker dashboard: http://{bind_host}:{bind_port}")
     server.serve_forever()
-    if prepared:
+
+
+def format_manual_queue(status: dict[str, Any], *, limit: int = 100) -> str:
+    jobs = [job for job in status["jobs"] if job.get("manual_submit_ready")]
+    lines = [
+        "Manual Submit Queue",
+        f"Generated: {status['generated_at']}",
+        f"Jobs ready for manual review/submission: {len(jobs)}",
+        "",
+    ]
+    for job in jobs[:limit]:
+        lines.extend(
+            [
+                f"{job['id']} | {job['state']} | score {job['score']} | {job['title']} | {job['company']}",
+                f"  URL: {job.get('url', '')}",
+                f"  Prepare: .venv/bin/python -m app.main apply --job-id {job['id']} --prepare",
+                f"  Manual review: .venv/bin/python -m app.main apply --job-id {job['id']} --confirm",
+            ]
+        )
+        questions = job.get("risks_uncertainties") or []
+        if questions:
+            lines.append(f"  Needs: {questions[0]}")
         lines.append("")
-        lines.append("Ready for your final submit:")
-        for job in prepared[:5]:
-            lines.append(f"- {job['title']} at {job['company']}")
+    if len(jobs) > limit:
+        lines.append(f"... {len(jobs) - limit} more omitted; rerun with a higher --limit.")
+    if not jobs:
+        lines.append("No drafted/prepared jobs are waiting for manual submission.")
+    return "\n".join(lines)

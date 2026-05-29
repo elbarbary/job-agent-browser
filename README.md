@@ -314,6 +314,7 @@ Greenhouse, and SmartRecruiters pages:
 ```bash
 .venv/bin/python -m app.main search-jobs --query "software engineering intern" --location "remote"
 .venv/bin/python -m app.main review-jobs
+.venv/bin/python -m app.main manual-queue --limit 50
 .venv/bin/python -m app.main apply --job-id <id> --dry-run
 ```
 
@@ -329,6 +330,12 @@ The dashboard will mark the job as `prepared_manual_submit` and show a review li
 Open that link, review the filled browser tab, answer anything still missing, check
 any required consent/terms boxes yourself, and press Submit manually. The prepare
 mode never clicks the final submit/apply button.
+
+Every ordinary draft is also in the manual submit queue. The tracker dashboard
+shows direct links to the original application page plus the exact `--prepare`
+and `--confirm` commands for each drafted job. `prepared_manual_submit` only means
+the agent has already opened and pre-filled a live remote browser tab; it is not
+the full set of jobs you can review manually.
 
 Public search engines may present an anti-automation interstitial. In that case, use
 the background feed worker or supply a public ATS posting URL directly:
