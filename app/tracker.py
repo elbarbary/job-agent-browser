@@ -17,9 +17,13 @@ from urllib.request import Request, urlopen
 
 from .application_agent import ApplicationRepository
 from .config import LOCAL_HOSTS, ConfigurationError, Settings
+from .cover_letter import generate_cover_letter
 from .cv_store import CVError, ingest_cv
 from .preferences import DEFAULT_USER_PREFERENCES, load_preferences
 from .profile_review import CONFIRM_PROFILE_PHRASE, build_profile_review, mark_profile_reviewed
+from .question_queue import question_queue_path, save_question_answers, unanswered_questions
+from .source_catalog import KNOWN_JOB_SOURCES
+from .watchlist import load_watchlist, watchlist_path
 
 
 DASHBOARD_NAV = (
@@ -30,6 +34,7 @@ DASHBOARD_NAV = (
     ("Autopilot", "/autopilot"),
     ("Worker", "/worker"),
     ("Web Search", "/search"),
+    ("Questions", "/questions"),
 )
 
 PROVIDER_ENV_KEYS = {
@@ -85,6 +90,58 @@ def _format_key_value_lines(values: Any) -> str:
     if not isinstance(values, dict):
         return ""
     return "\n".join(f"{key} = {value}" for key, value in values.items())
+
+
+def _parse_source_urls(value: str) -> list[dict[str, str]]:
+    urls: list[dict[str, str]] = []
+    for raw_line in value.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        urls.append({"url": line})
+    return urls
+
+
+def _format_source_urls(values: Any) -> str:
+    if not isinstance(values, list):
+        return ""
+    urls: list[str] = []
+    for item in values:
+        if isinstance(item, dict):
+            url = str(item.get("url") or "").strip()
+        else:
+            url = str(item).strip()
+        if url:
+            urls.append(url)
+    return "\n".join(urls)
+
+
+def _parse_query_lines(value: str) -> list[dict[str, str]]:
+    queries: list[dict[str, str]] = []
+    for raw_line in value.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "|" in line:
+            query, location = line.split("|", 1)
+        else:
+            query, location = line, ""
+        queries.append({"query": query.strip(), "location": location.strip()})
+    return [item for item in queries if item["query"]]
+
+
+def _format_query_lines(values: Any) -> str:
+    if not isinstance(values, list):
+        return ""
+    lines: list[str] = []
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        query = str(item.get("query") or "").strip()
+        location = str(item.get("location") or "").strip()
+        if query:
+            lines.append(f"{query} | {location}".rstrip(" |"))
+    return "\n".join(lines)
 
 
 def _gui_settings_path(settings: Settings) -> Path:
@@ -307,6 +364,63 @@ def _autopilot_action(settings: Settings, form: dict[str, list[str]]) -> dict[st
     return {"ok": False, "output": f"Unknown autopilot action: {action}"}
 
 
+def _source_action(settings: Settings, form: dict[str, list[str]]) -> dict[str, Any]:
+    action = (form.get("action") or [""])[0]
+    if action != "save-sources":
+        return {"ok": False, "output": f"Unknown source action: {action}"}
+    watchlist = load_watchlist(settings)
+    discovery_mode = (form.get("discovery_mode") or ["alternate"])[0]
+    if discovery_mode not in {"online", "source_urls", "both", "alternate"}:
+        discovery_mode = "alternate"
+    watchlist["discovery_mode"] = discovery_mode
+    watchlist["public_feeds_enabled"] = (form.get("public_feeds_enabled") or ["off"])[0] == "on"
+    watchlist["queries_enabled"] = (form.get("queries_enabled") or ["off"])[0] == "on"
+    watchlist["public_feed_limit"] = int((form.get("public_feed_limit") or ["40"])[0] or "40")
+    watchlist["source_urls_per_cycle"] = int((form.get("source_urls_per_cycle") or ["10"])[0] or "10")
+    watchlist["max_results_per_query"] = int((form.get("max_results_per_query") or ["5"])[0] or "5")
+    watchlist["queries"] = _parse_query_lines((form.get("queries") or [""])[0])
+    watchlist["source_urls"] = _parse_source_urls((form.get("source_urls") or [""])[0])
+    selected_sources = form.get("enabled_source_names") or []
+    watchlist["enabled_source_names"] = selected_sources or [str(item["name"]) for item in KNOWN_JOB_SOURCES]
+    watchlist["updated_at"] = datetime.now(UTC).isoformat()
+    path = watchlist_path(settings)
+    _write_private_json(path, watchlist)
+    return {"ok": True, "output": f"Saved discovery sources to {path}."}
+
+
+def _questions_action(settings: Settings, form: dict[str, list[str]]) -> dict[str, Any]:
+    action = (form.get("action") or [""])[0]
+    if action == "save-question-answers":
+        answers = {
+            key.removeprefix("answer_"): value[0]
+            for key, value in form.items()
+            if key.startswith("answer_") and value
+        }
+        path = save_question_answers(settings, answers)
+        return {"ok": True, "output": f"Saved answers and synced them to onboarding defaults: {path}"}
+    if action == "prepare-unanswered-jobs":
+        queue = _read_json(question_queue_path(settings), {"questions": []})
+        job_ids: list[str] = []
+        for item in queue.get("questions", []):
+            if not isinstance(item, dict) or not str(item.get("answer") or "").strip():
+                continue
+            job_ids.extend(str(job_id) for job_id in item.get("jobs", []))
+        unique_job_ids = sorted(set(job_ids))
+        if not unique_job_ids:
+            return {"ok": False, "output": "No answered queued questions are linked to jobs yet."}
+        outputs: list[str] = []
+        for job_id in unique_job_ids[:10]:
+            result = _run_command(
+                [str(settings.root / ".venv/bin/python"), "-m", "app.main", "apply", "--job-id", job_id, "--prepare"],
+                cwd=settings.root,
+                timeout=600,
+                input_text="",
+            )
+            outputs.append(f"{job_id}: {'ok' if result['ok'] else 'failed'}\n{result['output'][:1200]}")
+        return {"ok": True, "output": "\n\n".join(outputs)}
+    return {"ok": False, "output": f"Unknown questions action: {action}"}
+
+
 def _upload_cv(settings: Settings, handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     content_type = handler.headers.get("Content-Type", "")
     if not content_type.startswith("multipart/form-data"):
@@ -361,6 +475,13 @@ def _job_action(settings: Settings, form: dict[str, list[str]]) -> dict[str, Any
             timeout=600,
             input_text="",
         )
+
+    if action == "generate-cover-letter":
+        try:
+            path = generate_cover_letter(settings, job)
+            return {"ok": True, "output": f"Generated cover letter PDF: {path}"}
+        except Exception as exc:  # noqa: BLE001 - dashboard should show local generation errors.
+            return {"ok": False, "output": str(exc)}
 
     if action == "mark-submitted":
         _write_private_json(
@@ -672,6 +793,10 @@ def _job_article(job: dict[str, Any]) -> str:
             <p><a class="review secondary" href="{job_url}">Open original application page</a></p>
             {review_button}
             {prepare_button}
+            <form method="post" action="/job-action">
+              <input type="hidden" name="job_id" value="{job_id}">
+              <button class="secondary" name="action" value="generate-cover-letter">Generate PDF cover letter</button>
+            </form>
             <p>CLI fallback for pre-filling in the remote challenge browser:</p>
             <code>.venv/bin/python -m app.main apply --job-id {job_id} --prepare</code>
             <p>To open a final manual review session from the CLI:</p>
@@ -773,6 +898,26 @@ def render_worker_html(settings: Settings, status: dict[str, Any], *, message: s
 
 def render_search_html(settings: Settings, status: dict[str, Any], *, query: str = "", message: str = "") -> str:
     runtime = _local_search_runtime(settings)
+    watchlist = load_watchlist(settings)
+    enabled_sources = set(watchlist.get("enabled_source_names") or [])
+    source_checks = "".join(
+        f'<label style="display:block"><input type="checkbox" name="enabled_source_names" value="{html.escape(str(source["name"]))}" '
+        f'{"checked" if str(source["name"]) in enabled_sources else ""}> '
+        f'{html.escape(str(source["name"]))} <small>{html.escape(", ".join(source.get("domains", [])))}</small></label>'
+        for source in KNOWN_JOB_SOURCES
+    )
+    discovery_mode = str(watchlist.get("discovery_mode") or "alternate")
+    mode_options = "".join(
+        f'<option value="{value}" {"selected" if discovery_mode == value else ""}>{label}</option>'
+        for value, label in (
+            ("alternate", "Alternate online and source URLs"),
+            ("both", "Online and source URLs every cycle"),
+            ("online", "Online discovery only"),
+            ("source_urls", "Source URLs only"),
+        )
+    )
+    queries_text = html.escape(_format_query_lines(watchlist.get("queries") or []))
+    source_urls_text = html.escape(_format_source_urls(watchlist.get("source_urls") or []))
     results_html = ""
     if query:
         search_url = f"{settings.searxng_base_url}/search?{urlencode({'q': query, 'format': 'json'})}"
@@ -805,6 +950,27 @@ def render_search_html(settings: Settings, status: dict[str, Any], *, query: str
         <button class="danger" name="action" value="search-stop">Stop local search</button>
       </form>
       <p>If Docker requires sudo, use SSH and run <code>scripts/start_local_search.sh</code> or <code>scripts/stop_local_search.sh</code>.</p>
+    </section>
+    <section class="panel">
+      <h2>Discovery Sources</h2>
+      <p>Choose whether each worker cycle searches online, follows your own source URLs, or alternates between them. This stays private in <code>data/profiles/watchlist.json</code>.</p>
+      <form method="post" action="/source-action">
+        <input type="hidden" name="action" value="save-sources">
+        <label>Mode<br><select name="discovery_mode">{mode_options}</select></label><br><br>
+        <label><input type="checkbox" name="public_feeds_enabled" {"checked" if watchlist.get("public_feeds_enabled", True) else ""}> Use public feed APIs</label><br>
+        <label><input type="checkbox" name="queries_enabled" {"checked" if watchlist.get("queries_enabled", False) else ""}> Use local SearXNG web search queries</label><br><br>
+        <label>Public feed limit<br><input name="public_feed_limit" value="{html.escape(str(watchlist.get('public_feed_limit', 40)))}"></label><br><br>
+        <label>Source URLs per cycle<br><input name="source_urls_per_cycle" value="{html.escape(str(watchlist.get('source_urls_per_cycle', 10)))}"></label><br><br>
+        <label>Max results per query<br><input name="max_results_per_query" value="{html.escape(str(watchlist.get('max_results_per_query', 5)))}"></label><br><br>
+        <label>Online queries, one per line as <code>query | location</code><br>
+          <textarea name="queries" rows="7">{queries_text}</textarea>
+        </label><br><br>
+        <label>Source URLs, one job URL per line<br>
+          <textarea name="source_urls" rows="7" placeholder="https://jobs.lever.co/company/job-id">{source_urls_text}</textarea>
+        </label><br><br>
+        <details open><summary>Known job websites / ATS sources</summary>{source_checks}</details>
+        <button type="submit">Save discovery sources</button>
+      </form>
     </section>
     {results_html}
     """
@@ -908,6 +1074,42 @@ def render_onboarding_html(settings: Settings, status: dict[str, Any], *, messag
     return _dashboard_shell(title="Onboarding", generated_at=status["generated_at"], body=body, active_path="/onboarding", message=message)
 
 
+def render_questions_html(settings: Settings, status: dict[str, Any], *, message: str = "") -> str:
+    queue = _read_json(question_queue_path(settings), {"questions": []})
+    questions = [item for item in queue.get("questions", []) if isinstance(item, dict)]
+    unanswered = unanswered_questions(settings)
+    rows = []
+    for item in questions:
+        item_id = html.escape(str(item.get("id") or ""))
+        question = html.escape(str(item.get("question") or ""))
+        answer = html.escape(str(item.get("answer") or ""))
+        jobs = ", ".join(str(job_id) for job_id in item.get("jobs", []))
+        rows.append(
+            f"""
+            <article class="job">
+              <strong>{question}</strong>
+              <p>Linked jobs: <code>{html.escape(jobs or 'none')}</code></p>
+              <input name="answer_{item_id}" value="{answer}" placeholder="Type your reusable answer">
+            </article>
+            """
+        )
+    body = _summary_cards(status["counts"]) + f"""
+    <section class="panel">
+      <h2>Question Queue</h2>
+      <p>{len(unanswered)} unanswered questions. When a form has a required question the AI cannot answer from your CV or saved preferences, it appears here. Your answer is synced into onboarding defaults so the AI can retry filling those jobs.</p>
+      <form method="post" action="/questions-action">
+        <input type="hidden" name="action" value="save-question-answers">
+        {''.join(rows) or '<p>No queued questions yet.</p>'}
+        <button type="submit">Save answers to onboarding defaults</button>
+      </form>
+      <form method="post" action="/questions-action">
+        <button class="secondary" name="action" value="prepare-unanswered-jobs">Go back and fill jobs with answered questions</button>
+      </form>
+    </section>
+    """
+    return _dashboard_shell(title="Questions", generated_at=status["generated_at"], body=body, active_path="/questions", message=message)
+
+
 def render_provider_html(settings: Settings, status: dict[str, Any], *, message: str = "") -> str:
     provider_settings = load_provider_settings(settings)
     active_provider = str(provider_settings.get("active_provider") or "ollama")
@@ -992,6 +1194,8 @@ def serve_tracker(settings: Settings, host: str | None = None, port: int | None 
             elif parsed.path == "/search":
                 query = (parse_qs(parsed.query).get("q") or [""])[0]
                 payload = render_search_html(settings, status, query=query).encode("utf-8")
+            elif parsed.path == "/questions":
+                payload = render_questions_html(settings, status).encode("utf-8")
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -1009,7 +1213,7 @@ def serve_tracker(settings: Settings, host: str | None = None, port: int | None 
                 status = tracker_status(settings)
                 message = f"upload-cv: {'ok' if result.get('ok') else 'failed'}\n{result.get('output', '')}".strip()
                 payload = render_onboarding_html(settings, status, message=message).encode("utf-8")
-            elif parsed.path in {"/action", "/job-action", "/onboarding-action", "/provider-action", "/autopilot-action"}:
+            elif parsed.path in {"/action", "/job-action", "/onboarding-action", "/provider-action", "/autopilot-action", "/source-action", "/questions-action"}:
                 length = int(self.headers.get("Content-Length", "0"))
                 body = self.rfile.read(length).decode("utf-8", errors="replace")
                 form = parse_qs(body)
@@ -1026,6 +1230,12 @@ def serve_tracker(settings: Settings, host: str | None = None, port: int | None 
                 elif parsed.path == "/provider-action":
                     result = _provider_action(settings, form)
                     active = "/providers"
+                elif parsed.path == "/source-action":
+                    result = _source_action(settings, form)
+                    active = "/search"
+                elif parsed.path == "/questions-action":
+                    result = _questions_action(settings, form)
+                    active = "/questions"
                 else:
                     result = _autopilot_action(settings, form)
                     active = "/autopilot"
@@ -1041,6 +1251,8 @@ def serve_tracker(settings: Settings, host: str | None = None, port: int | None 
                     payload = render_onboarding_html(settings, status, message=message).encode("utf-8")
                 elif active == "/providers":
                     payload = render_provider_html(settings, status, message=message).encode("utf-8")
+                elif active == "/questions":
+                    payload = render_questions_html(settings, status, message=message).encode("utf-8")
                 else:
                     payload = render_autopilot_html(settings, status, message=message).encode("utf-8")
             else:

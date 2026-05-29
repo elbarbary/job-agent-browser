@@ -3,9 +3,19 @@ from __future__ import annotations
 import unittest
 
 from app.job_sources import FeedItem, _looks_relevant, clean_html, make_job_id
+from app.source_catalog import all_source_domains
+from app.web_search import build_job_search_terms
 
 
 class JobSourcesTests(unittest.TestCase):
+    def test_catalog_feeds_search_terms(self) -> None:
+        domains = all_source_domains()
+        self.assertIn("jobs.lever.co", domains)
+        self.assertIn("myworkdayjobs.com", domains)
+        terms = build_job_search_terms("AI product", "Switzerland", ["jobs.lever.co", "jobs.ashbyhq.com"])
+        self.assertIn("site:jobs.lever.co", terms)
+        self.assertIn("site:jobs.ashbyhq.com", terms)
+
     def test_clean_html_extracts_text(self) -> None:
         self.assertEqual(clean_html("<p>Hello <strong>AI</strong></p>"), "Hello\nAI")
 

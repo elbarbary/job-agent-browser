@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
+from .source_catalog import source_names
 
 
 DEFAULT_WATCHLIST: dict[str, Any] = {
@@ -18,10 +19,13 @@ DEFAULT_WATCHLIST: dict[str, Any] = {
     "autopilot_scan_top_n": 25,
     "min_auto_draft_score": 45,
     "with_llm_advisory": True,
+    "discovery_mode": "alternate",
     "public_feeds_enabled": True,
     "public_feed_limit": 40,
+    "source_urls_per_cycle": 10,
     "queries_enabled": False,
     "max_results_per_query": 5,
+    "enabled_source_names": source_names(),
     "queries": [
         {"query": "software engineer", "location": "remote"},
         {"query": "machine learning engineer", "location": "remote"},
@@ -30,9 +34,9 @@ DEFAULT_WATCHLIST: dict[str, Any] = {
     ],
     "source_urls": [],
     "notes": [
-        "Public feeds currently include Remotive, RemoteOK, and Arbeitnow.",
-        "General search engines may block automation. Add approved Lever/Greenhouse/SmartRecruiters posting URLs to source_urls for reliable polling.",
-        "Set queries_enabled to true only if public search pages are working from this host.",
+        "Discovery mode can be online, source_urls, both, or alternate.",
+        "Online discovery uses public feeds and optional local SearXNG searches across the enabled source catalog.",
+        "Source URL discovery follows job URLs you add manually.",
         "The worker drafts locally only for jobs at or above min_auto_draft_score. Autopilot submissions require private autopilot.json authorization.",
     ],
 }
@@ -56,4 +60,13 @@ def load_watchlist(settings: Settings) -> dict[str, Any]:
     path = watchlist_path(settings)
     if not path.exists():
         write_default_watchlist(settings)
-    return json.loads(path.read_text(encoding="utf-8"))
+    watchlist = json.loads(path.read_text(encoding="utf-8"))
+    changed = False
+    for key, value in DEFAULT_WATCHLIST.items():
+        if key not in watchlist:
+            watchlist[key] = value
+            changed = True
+    if changed:
+        path.write_text(json.dumps(watchlist, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+        path.chmod(0o600)
+    return watchlist

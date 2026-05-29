@@ -14,6 +14,7 @@ from app.tracker import (
     render_autopilot_html,
     render_onboarding_html,
     render_provider_html,
+    render_questions_html,
     render_tracker_html,
     render_worker_html,
     render_search_html,
@@ -96,6 +97,7 @@ class TrackerTests(unittest.TestCase):
             self.assertIn("Autopilot", render_tracker_html(status))
             self.assertIn("Worker", render_tracker_html(status))
             self.assertIn("Web Search", render_tracker_html(status))
+            self.assertIn("Questions", render_tracker_html(status))
             self.assertIn("Manual submit options", render_manual_queue_html(status))
             self.assertIn("Upload CV", render_onboarding_html(settings, status))
             self.assertIn("Extra default answers", render_onboarding_html(settings, status))
@@ -103,6 +105,8 @@ class TrackerTests(unittest.TestCase):
             self.assertIn("AI fills, I submit", render_autopilot_html(settings, status))
             self.assertIn("Worker Control", render_worker_html(settings, status))
             self.assertIn("Local Web Search", render_search_html(settings, status))
+            self.assertIn("Discovery Sources", render_search_html(settings, status))
+            self.assertIn("Question Queue", render_questions_html(settings, status))
             self.assertIn("Draft answers", render_tracker_html(status))
             self.assertIn("Manual Submit Queue", format_manual_queue(status))
             self.assertIn("--prepare", format_manual_queue(status))

@@ -90,6 +90,8 @@ class ApplicationWorkflowTests(unittest.TestCase):
                 draft["required_user_answers"],
                 ["needs_user_answer: desired salary or salary history is not stated in the CV."],
             )
+            question_queue = json.loads((settings.profile_dir / "application_questions.json").read_text(encoding="utf-8"))
+            self.assertIn("desired salary", question_queue["questions"][0]["question"])
             approval = json.loads(
                 workflow.approve_for_manual_submission("abc123").read_text(encoding="utf-8")
             )

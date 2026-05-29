@@ -11,6 +11,7 @@ from .config import Settings
 from .cv_store import load_profile
 from .job_profile import RankedJob, match_job
 from .preferences import load_preferences
+from .source_catalog import all_source_domains
 from .web_search import build_job_search_terms, search_web
 from .webabi.recorder import AuditRecorder
 
@@ -20,21 +21,31 @@ def build_search_url(query: str, location: str) -> str:
     return f"https://html.duckduckgo.com/html/?q={quote_plus(terms)}"
 
 
+def _chunks(items: list[str], size: int) -> list[list[str]]:
+    return [items[index : index + size] for index in range(0, len(items), size)]
+
+
 async def discover_web_search_links(
     settings: Settings,
     query: str,
     location: str,
     *,
     max_results: int,
+    source_domains: list[str] | None = None,
 ) -> list[dict[str, str]]:
-    terms = build_job_search_terms(query, location)
-    results = await search_web(settings, terms, max_results=max_results * 3)
     links: list[dict[str, str]] = []
-    for result in results:
-        if settings.is_allowed_url(result.url):
+    seen: set[str] = set()
+    domains = source_domains or all_source_domains()
+    for domain_chunk in _chunks(domains, 6):
+        terms = build_job_search_terms(query, location, domain_chunk)
+        results = await search_web(settings, terms, max_results=max_results * 2)
+        for result in results:
+            if result.url in seen or not settings.is_allowed_url(result.url):
+                continue
+            seen.add(result.url)
             links.append({"title": result.title, "url": result.url, "description": result.snippet})
-        if len(links) >= max_results:
-            break
+            if len(links) >= max_results:
+                return links
     return links
 
 
@@ -59,6 +70,7 @@ async def search_and_rank_jobs(
     location: str,
     source_url: str | None = None,
     max_results: int = 5,
+    source_domains: list[str] | None = None,
 ) -> list[dict[str, object]]:
     profile = load_profile(settings)
     preferences = load_preferences(settings)
@@ -67,7 +79,13 @@ async def search_and_rank_jobs(
         links = [await engine.read_job_detail(source_url)]
     else:
         if settings.web_search_provider == "searxng":
-            links = await discover_web_search_links(settings, query, location, max_results=max_results)
+            links = await discover_web_search_links(
+                settings,
+                query,
+                location,
+                max_results=max_results,
+                source_domains=source_domains,
+            )
         else:
             links = await engine.extract_job_links(build_search_url(query, location))
     jobs: list[dict[str, object]] = []

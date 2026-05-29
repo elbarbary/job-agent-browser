@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import httpx
 
 from .config import Settings
+from .source_catalog import all_source_domains
 
 
 class WebSearchError(RuntimeError):
@@ -22,13 +23,12 @@ class WebSearchResult:
     snippet: str
 
 
-def build_job_search_terms(query: str, location: str) -> str:
+def build_job_search_terms(query: str, location: str, source_domains: list[str] | None = None) -> str:
+    domains = source_domains or all_source_domains()
+    site_terms = " OR ".join(f"site:{domain}" for domain in domains)
     return (
         f"{query} {location} "
-        "(site:jobs.lever.co OR site:boards.greenhouse.io OR site:job-boards.greenhouse.io "
-        "OR site:job-boards.eu.greenhouse.io OR site:jobs.ashbyhq.com "
-        "OR site:jobs.workable.com OR site:apply.workable.com "
-        "OR site:careers.smartrecruiters.com)"
+        f"({site_terms})"
     )
 
 

@@ -12,6 +12,7 @@ from .autopilot import decide_autopilot_for_job, load_autopilot, write_default_a
 from .application_agent import ApplicationRepository, ApplicationWorkflow
 from .browser_engine import BrowserEngine, BrowserSafetyError
 from .config import ConfigurationError, Settings
+from .cover_letter import generate_cover_letter
 from .cv_store import CVError, ingest_cv, load_profile
 from .email_notifier import EmailConfigurationError, generate_daily_update, send_update
 from .job_search import search_and_rank_jobs
@@ -19,6 +20,7 @@ from .llm_client import LocalLLMClient, LocalLLMError
 from .policy import PolicyViolation, RiskClass, require_typed_confirmation
 from .preferences import write_default_preferences
 from .profile_review import CONFIRM_PROFILE_PHRASE, build_profile_review, mark_profile_reviewed
+from .question_queue import add_questions
 from .telegram_notifier import TelegramConfigurationError, send_telegram_message, write_default_telegram
 from .tracker import format_manual_queue, format_tracker_text, format_tracker_chat, serve_tracker, tracker_status, write_tracker_html
 from .watchlist import write_default_watchlist
@@ -98,6 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode = apply.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--prepare", action="store_true", help="Fill known fields in the challenge browser, then stop before final submit")
+    mode.add_argument("--cover-letter", action="store_true", help="Generate a grounded PDF cover letter for this job")
     mode.add_argument("--confirm", action="store_true")
     mode.add_argument("--auto-submit", action="store_true")
     apply.add_argument(
@@ -204,8 +207,21 @@ async def _run_async(args: argparse.Namespace, settings: Settings) -> int:
         if result.get("prepared"):
             prepared_path = workflow.record_prepared_manual_submit(args.job_id, result)
             print(f"Prepared application saved: {prepared_path}")
+        missing = [
+            str(item)
+            for item in result.get("errors", [])
+            if "needs manual review" in str(item).casefold() or "unknown" in str(item).casefold()
+        ]
+        if missing:
+            add_questions(settings, missing, job_id=args.job_id, job=draft["job"])
         print(json.dumps(result, indent=2, ensure_ascii=True))
         return 0 if result.get("prepared") else 2
+    if args.command == "apply" and args.cover_letter:
+        workflow = ApplicationWorkflow(settings, recorder)
+        job = workflow.repository.find_job(args.job_id)
+        path = generate_cover_letter(settings, job)
+        print(f"Cover letter PDF saved: {path}")
+        return 0
     if args.command == "apply" and args.auto_submit:
         workflow = ApplicationWorkflow(settings, recorder)
         if workflow.repository.has_submission(args.job_id):

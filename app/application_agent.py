@@ -12,6 +12,7 @@ from .cv_store import load_profile
 from .job_profile import RankedJob, match_job
 from .preferences import load_preferences
 from .policy import RiskClass, assert_action_allowed
+from .question_queue import add_questions
 from .webabi.recorder import AuditRecorder
 from .webabi.schema import ActionRecord
 
@@ -91,6 +92,8 @@ class ApplicationWorkflow:
         _apply_user_confirmed_facts(answers, facts)
         remaining_user_answers = _remaining_user_answers(job.risks_uncertainties, answers)
         job.risks_uncertainties = remaining_user_answers
+        if remaining_user_answers:
+            add_questions(self.settings, remaining_user_answers, job_id=job_id, job=job.to_dict())
         payload = {
             "job": job.to_dict(),
             "status": "draft_only_no_submission",

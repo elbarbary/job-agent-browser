@@ -18,6 +18,7 @@ from .email_notifier import generate_daily_update
 from .job_sources import discover_public_feed_jobs
 from .job_search import search_and_rank_jobs
 from .llm_client import LocalLLMClient, LocalLLMError
+from .source_catalog import domains_for_names
 from .telegram_notifier import TelegramConfigurationError, load_telegram_config, send_telegram_message, telegram_ready
 from .tracker import format_tracker_chat, tracker_status
 from .watchlist import load_watchlist
@@ -61,6 +62,30 @@ def setup_logging(settings: Settings) -> Path:
     return path
 
 
+def _last_discovery_lane(settings: Settings) -> str | None:
+    status_path = settings.applications_dir / "worker_status.json"
+    if not status_path.exists():
+        return None
+    try:
+        return str(json.loads(status_path.read_text(encoding="utf-8")).get("discovery_lane") or "")
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _discovery_plan(settings: Settings, watchlist: dict[str, Any]) -> tuple[bool, bool, str]:
+    mode = str(watchlist.get("discovery_mode") or "alternate").casefold()
+    if mode == "online":
+        return True, False, "online"
+    if mode == "source_urls":
+        return False, True, "source_urls"
+    if mode == "both":
+        return True, True, "both"
+    last_lane = _last_discovery_lane(settings)
+    if last_lane == "online":
+        return False, True, "source_urls"
+    return True, False, "online"
+
+
 async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[str, Any]:
     settings.ensure_directories()
     watchlist = load_watchlist(settings)
@@ -69,8 +94,9 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
     existing = {str(job.get("url")): job for job in repository.load_jobs()}
     found: list[dict[str, Any]] = []
     errors: list[str] = []
+    run_online, run_source_urls, discovery_lane = _discovery_plan(settings, watchlist)
 
-    if watchlist.get("public_feeds_enabled", True):
+    if run_online and watchlist.get("public_feeds_enabled", True):
         try:
             found.extend(
                 await discover_public_feed_jobs(
@@ -82,23 +108,29 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
             errors.append(f"public feeds: {exc}")
             LOGGER.exception("public feed discovery failed")
 
-    for item in watchlist.get("source_urls", []):
-        source_url = item["url"] if isinstance(item, dict) else str(item)
-        try:
-            jobs = await search_and_rank_jobs(
-                settings,
-                recorder,
-                "approved source url",
-                "user watchlist",
-                source_url=source_url,
-                max_results=1,
-            )
-            found.extend(jobs)
-        except Exception as exc:
-            errors.append(f"{source_url}: {exc}")
-            LOGGER.exception("source_url failed: %s", source_url)
+    if run_source_urls and not watchlist.get("source_urls", []):
+        errors.append("source URL discovery selected, but no source_urls are configured")
 
-    if watchlist.get("queries_enabled", False):
+    if run_source_urls:
+        source_url_limit = max(1, int(watchlist.get("source_urls_per_cycle", 10)))
+        for item in watchlist.get("source_urls", [])[:source_url_limit]:
+            source_url = item["url"] if isinstance(item, dict) else str(item)
+            try:
+                jobs = await search_and_rank_jobs(
+                    settings,
+                    recorder,
+                    "approved source url",
+                    "user watchlist",
+                    source_url=source_url,
+                    max_results=1,
+                )
+                found.extend(jobs)
+            except Exception as exc:
+                errors.append(f"{source_url}: {exc}")
+                LOGGER.exception("source_url failed: %s", source_url)
+
+    if run_online and watchlist.get("queries_enabled", False):
+        source_domains = domains_for_names(watchlist.get("enabled_source_names") or [])
         for query in watchlist.get("queries", []):
             try:
                 jobs = await search_and_rank_jobs(
@@ -107,6 +139,7 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
                     str(query["query"]),
                     str(query["location"]),
                     max_results=int(watchlist.get("max_results_per_query", 5)),
+                    source_domains=source_domains,
                 )
                 found.extend(jobs)
             except Exception as exc:
@@ -116,8 +149,10 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
                     errors.append("public search queries paused for this run after search-engine anti-bot challenge")
                     LOGGER.warning("public search queries paused for this run after anti-bot challenge")
                     break
+    elif run_online:
+        LOGGER.info("online query search is disabled; public feed APIs may still run")
     else:
-        LOGGER.info("public search queries are disabled; processing source_urls only")
+        LOGGER.info("online discovery skipped for lane=%s", discovery_lane)
 
     for job in found:
         existing[str(job.get("url"))] = job
@@ -214,6 +249,10 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         "generated_at": datetime.now(UTC).isoformat(),
         "jobs_known": len(ranked),
         "jobs_found_this_run": len(found),
+        "discovery_mode": str(watchlist.get("discovery_mode") or "alternate"),
+        "discovery_lane": discovery_lane,
+        "run_online_sources": run_online,
+        "run_source_urls": run_source_urls,
         "eligible_jobs": len([job for job in ranked if _job_score(job) >= min_score]),
         "auto_draft_top_n": draft_top_n,
         "autopilot_scan_top_n": autopilot_scan_top_n,
