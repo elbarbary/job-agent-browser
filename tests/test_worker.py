@@ -40,6 +40,11 @@ class WorkerSelectionTests(unittest.TestCase):
             (settings.applications_dir / "worker_status.json").write_text('{"discovery_lane": "online"}')
             self.assertEqual(_discovery_plan(settings, {"discovery_mode": "alternate"}), (False, True, "source_urls"))
 
+    def test_worker_source_url_timeout_default_is_configured(self) -> None:
+        from app.watchlist import DEFAULT_WATCHLIST
+
+        self.assertEqual(DEFAULT_WATCHLIST["source_url_timeout_seconds"], 120)
+
 
 if __name__ == "__main__":
     unittest.main()

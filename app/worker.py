@@ -113,18 +113,25 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
 
     if run_source_urls:
         source_url_limit = max(1, int(watchlist.get("source_urls_per_cycle", 10)))
+        source_url_timeout = max(15, int(watchlist.get("source_url_timeout_seconds", 120)))
         for item in watchlist.get("source_urls", [])[:source_url_limit]:
             source_url = item["url"] if isinstance(item, dict) else str(item)
             try:
-                jobs = await search_and_rank_jobs(
-                    settings,
-                    recorder,
-                    "approved source url",
-                    "user watchlist",
-                    source_url=source_url,
-                    max_results=1,
+                jobs = await asyncio.wait_for(
+                    search_and_rank_jobs(
+                        settings,
+                        recorder,
+                        "approved source url",
+                        "user watchlist",
+                        source_url=source_url,
+                        max_results=1,
+                    ),
+                    timeout=source_url_timeout,
                 )
                 found.extend(jobs)
+            except TimeoutError:
+                errors.append(f"{source_url}: timed out after {source_url_timeout}s")
+                LOGGER.warning("source_url timed out after %ss: %s", source_url_timeout, source_url)
             except Exception as exc:
                 errors.append(f"{source_url}: {exc}")
                 LOGGER.exception("source_url failed: %s", source_url)
@@ -253,6 +260,8 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         "discovery_lane": discovery_lane,
         "run_online_sources": run_online,
         "run_source_urls": run_source_urls,
+        "source_urls_per_cycle": int(watchlist.get("source_urls_per_cycle", 10)),
+        "source_url_timeout_seconds": int(watchlist.get("source_url_timeout_seconds", 120)),
         "eligible_jobs": len([job for job in ranked if _job_score(job) >= min_score]),
         "auto_draft_top_n": draft_top_n,
         "autopilot_scan_top_n": autopilot_scan_top_n,

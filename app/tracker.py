@@ -377,6 +377,7 @@ def _source_action(settings: Settings, form: dict[str, list[str]]) -> dict[str, 
     watchlist["queries_enabled"] = (form.get("queries_enabled") or ["off"])[0] == "on"
     watchlist["public_feed_limit"] = int((form.get("public_feed_limit") or ["40"])[0] or "40")
     watchlist["source_urls_per_cycle"] = int((form.get("source_urls_per_cycle") or ["10"])[0] or "10")
+    watchlist["source_url_timeout_seconds"] = int((form.get("source_url_timeout_seconds") or ["120"])[0] or "120")
     watchlist["max_results_per_query"] = int((form.get("max_results_per_query") or ["5"])[0] or "5")
     watchlist["queries"] = _parse_query_lines((form.get("queries") or [""])[0])
     watchlist["source_urls"] = _parse_source_urls((form.get("source_urls") or [""])[0])
@@ -961,6 +962,7 @@ def render_search_html(settings: Settings, status: dict[str, Any], *, query: str
         <label><input type="checkbox" name="queries_enabled" {"checked" if watchlist.get("queries_enabled", False) else ""}> Use local SearXNG web search queries</label><br><br>
         <label>Public feed limit<br><input name="public_feed_limit" value="{html.escape(str(watchlist.get('public_feed_limit', 40)))}"></label><br><br>
         <label>Source URLs per cycle<br><input name="source_urls_per_cycle" value="{html.escape(str(watchlist.get('source_urls_per_cycle', 10)))}"></label><br><br>
+        <label>Timeout per source URL, seconds<br><input name="source_url_timeout_seconds" value="{html.escape(str(watchlist.get('source_url_timeout_seconds', 120)))}"></label><br><br>
         <label>Max results per query<br><input name="max_results_per_query" value="{html.escape(str(watchlist.get('max_results_per_query', 5)))}"></label><br><br>
         <label>Online queries, one per line as <code>query | location</code><br>
           <textarea name="queries" rows="7">{queries_text}</textarea>

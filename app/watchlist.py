@@ -23,6 +23,7 @@ DEFAULT_WATCHLIST: dict[str, Any] = {
     "public_feeds_enabled": True,
     "public_feed_limit": 40,
     "source_urls_per_cycle": 10,
+    "source_url_timeout_seconds": 120,
     "queries_enabled": False,
     "max_results_per_query": 5,
     "enabled_source_names": source_names(),
