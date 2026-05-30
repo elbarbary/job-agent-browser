@@ -12,7 +12,7 @@ from .cv_store import load_profile
 from .job_profile import RankedJob, match_job
 from .preferences import load_preferences
 from .policy import RiskClass, assert_action_allowed
-from .question_queue import add_questions
+from .question_queue import add_questions, resolve_questions_for_job
 from .webabi.recorder import AuditRecorder
 from .webabi.schema import ActionRecord
 
@@ -67,10 +67,14 @@ class ApplicationRepository:
         return self.submission_attempt_path(job_id).exists()
 
     def record_submission(self, job_id: str, payload: dict[str, Any]) -> Path:
-        return _write_private_json(self.submission_path(job_id), payload)
+        output = _write_private_json(self.submission_path(job_id), payload)
+        resolve_questions_for_job(self.settings, job_id)
+        return output
 
     def record_prepared(self, job_id: str, payload: dict[str, Any]) -> Path:
-        return _write_private_json(self.prepared_path(job_id), payload)
+        output = _write_private_json(self.prepared_path(job_id), payload)
+        resolve_questions_for_job(self.settings, job_id)
+        return output
 
     def record_submission_attempt(self, job_id: str, payload: dict[str, Any]) -> Path:
         return _write_private_json(self.submission_attempt_path(job_id), payload)

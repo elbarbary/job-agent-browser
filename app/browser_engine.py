@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1189,6 +1190,18 @@ AUTOPILOT_SNAPSHOT_SCRIPT = """() => {
         }
         const label = el.closest('label');
         if (label) parts.push(label.innerText || '');
+        const group = el.closest('fieldset, [role="group"], [data-testid], [data-test], section, article, div');
+        if (group) {
+            const heading = group.querySelector('legend,h1,h2,h3,h4,label,p,span');
+            if (heading) parts.push(heading.innerText || '');
+        }
+        let previous = el.previousElementSibling;
+        let steps = 0;
+        while (previous && steps < 3) {
+            parts.push(previous.innerText || previous.textContent || '');
+            previous = previous.previousElementSibling;
+            steps += 1;
+        }
         parts.push(el.getAttribute('aria-label') || '');
         parts.push(el.getAttribute('placeholder') || '');
         parts.push(el.name || '');
@@ -1338,6 +1351,24 @@ def _click_application_entry_script(index: int) -> str:
 
 def _field_text(field: dict[str, Any]) -> str:
     return " ".join(str(field.get(key, "")) for key in ("label", "name", "id", "type")).casefold()
+
+
+def _field_label(field: dict[str, Any], index: int | None = None) -> str:
+    raw = str(field.get("label") or "").strip()
+    name = str(field.get("name") or "").strip()
+    identifier = str(field.get("id") or "").strip()
+    label = raw or name or identifier or (f"field {index}" if index is not None else "field")
+    if re.search(r"\bcards\[[^\]]+\]\[field\d+\]", label, flags=re.IGNORECASE):
+        options = [
+            str(option.get("text") or option.get("value") or "").strip()
+            for option in field.get("options") or []
+            if str(option.get("text") or option.get("value") or "").strip()
+        ]
+        visible_options = [option for option in options if option.casefold() not in {"select", "choose", "please select"}]
+        if visible_options:
+            return "required dropdown with options: " + ", ".join(visible_options[:8])
+        return "required dropdown whose label was not exposed by the website"
+    return re.sub(r"\s+", " ", label).strip()
 
 
 def _split_name(name: Any) -> tuple[str | None, str | None]:
@@ -1547,7 +1578,7 @@ def _planner_fill(
     field = next((candidate for candidate in fields if int(candidate.get("index", -1)) == field_index), None)
     if not field:
         return None
-    label = str(field.get("label") or field.get("name") or field.get("id") or f"field {field_index}")
+    label = _field_label(field, field_index)
     field_type = str(field.get("type", "")).casefold()
     tag = str(field.get("tag", "")).casefold()
     value = known_values[answer_key]
@@ -1624,7 +1655,7 @@ def _validate_required_fields(
         index = int(field.get("index", -1))
         if index in filled:
             continue
-        label = str(field.get("label") or field.get("name") or field.get("id") or f"field {index}")
+        label = _field_label(field, index)
         field_type = str(field.get("type", "")).casefold()
         tag = str(field.get("tag", "")).casefold()
         if field_type == "file":
@@ -1665,7 +1696,7 @@ def _plan_form_fills(
     for field in fields:
         field_type = str(field.get("type", "")).casefold()
         tag = str(field.get("tag", "")).casefold()
-        label = str(field.get("label") or field.get("name") or field.get("id") or f"field {field.get('index')}")
+        label = _field_label(field, int(field.get("index", -1)))
         required = bool(field.get("required"))
         if field_type == "file":
             resume_path = Path(str(config.get("resume_path") or "")).expanduser()

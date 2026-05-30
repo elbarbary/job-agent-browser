@@ -46,12 +46,26 @@ def normalize_question(value: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def is_user_answerable_question(value: str) -> bool:
+    text = normalize_question(value)
+    if not text:
+        return False
+    # Some ATS widgets expose only implementation names such as
+    # cards[uuid][field0]. Those are not reusable onboarding questions; they
+    # need manual review on the filled application page.
+    if re.search(r"\bcards\[[^\]]+\]\[field\d+\]", text, flags=re.IGNORECASE):
+        return False
+    if re.fullmatch(r"(field|input|select|dropdown)\s*\d+", text, flags=re.IGNORECASE):
+        return False
+    return True
+
+
 def add_questions(settings: Settings, questions: list[str], *, job_id: str | None = None, job: dict[str, Any] | None = None) -> Path:
     payload = _read_queue(settings)
     existing = {str(item.get("id")): item for item in payload.get("questions", []) if isinstance(item, dict)}
     for raw in questions:
         question = normalize_question(str(raw))
-        if not question:
+        if not question or not is_user_answerable_question(question):
             continue
         item_id = _question_id(question)
         item = existing.setdefault(
@@ -83,8 +97,45 @@ def unanswered_questions(settings: Settings) -> list[dict[str, Any]]:
     return [
         item
         for item in payload.get("questions", [])
-        if isinstance(item, dict) and not str(item.get("answer") or "").strip()
+        if isinstance(item, dict)
+        and not str(item.get("answer") or "").strip()
+        and is_user_answerable_question(str(item.get("question") or ""))
     ]
+
+
+def visible_questions(settings: Settings) -> list[dict[str, Any]]:
+    payload = _read_queue(settings)
+    return [
+        item
+        for item in payload.get("questions", [])
+        if isinstance(item, dict)
+        and not str(item.get("answer") or "").strip()
+        and str(item.get("status") or "needs_user_answer") != "resolved"
+        and is_user_answerable_question(str(item.get("question") or ""))
+    ]
+
+
+def resolve_questions_for_job(settings: Settings, job_id: str) -> Path:
+    payload = _read_queue(settings)
+    for item in payload.get("questions", []):
+        if not isinstance(item, dict):
+            continue
+        jobs = [str(value) for value in item.get("jobs", []) if str(value) != job_id]
+        item["jobs"] = jobs
+        if not jobs:
+            item["status"] = "resolved"
+            item["resolved_at"] = datetime.now(UTC).isoformat()
+    return _write_queue(settings, payload)
+
+
+def remove_unanswerable_questions(settings: Settings) -> Path:
+    payload = _read_queue(settings)
+    payload["questions"] = [
+        item
+        for item in payload.get("questions", [])
+        if isinstance(item, dict) and is_user_answerable_question(str(item.get("question") or ""))
+    ]
+    return _write_queue(settings, payload)
 
 
 def save_question_answers(settings: Settings, answers: dict[str, str]) -> Path:

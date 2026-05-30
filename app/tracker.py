@@ -21,7 +21,13 @@ from .cover_letter import generate_cover_letter
 from .cv_store import CVError, ingest_cv
 from .preferences import DEFAULT_USER_PREFERENCES, load_preferences
 from .profile_review import CONFIRM_PROFILE_PHRASE, build_profile_review, mark_profile_reviewed
-from .question_queue import question_queue_path, save_question_answers, unanswered_questions
+from .question_queue import (
+    question_queue_path,
+    resolve_questions_for_job,
+    save_question_answers,
+    unanswered_questions,
+    visible_questions,
+)
 from .question_retry import read_retry_status, retry_log_path, start_answered_question_retry
 from .source_catalog import KNOWN_JOB_SOURCES
 from .watchlist import load_watchlist, watchlist_path
@@ -484,6 +490,7 @@ def _job_action(settings: Settings, form: dict[str, list[str]]) -> dict[str, Any
             },
         )
         (settings.applications_dir / "status_overrides" / f"{job_id}.json").unlink(missing_ok=True)
+        resolve_questions_for_job(settings, job_id)
         return {"ok": True, "output": f"Marked {job_id} as submitted."}
 
     if action == "clear-submitted":
@@ -501,6 +508,7 @@ def _job_action(settings: Settings, form: dict[str, list[str]]) -> dict[str, Any
                 "note": note,
             },
         )
+        resolve_questions_for_job(settings, job_id)
         return {"ok": True, "output": f"Marked {job_id} as skipped."}
 
     if action == "mark-broken-link":
@@ -538,14 +546,15 @@ def tracker_status(settings: Settings) -> dict[str, Any]:
     for job in jobs:
         job_id = str(job.get("id", ""))
         draft = drafts.get(job_id)
-        if job_id in submissions:
+        override_state = str((status_overrides.get(job_id) or {}).get("status") or "")
+        if override_state in {"skipped", "broken_link"}:
+            state = override_state
+        elif job_id in submissions:
             state = "submitted"
         elif job_id in prepared:
             state = "prepared_manual_submit"
         elif job_id in attempts:
             state = "unverified_submit_click"
-        elif (status_overrides.get(job_id) or {}).get("status") in {"skipped", "broken_link"}:
-            state = str((status_overrides.get(job_id) or {}).get("status"))
         elif job_id in drafts:
             state = "drafted"
         else:
@@ -580,10 +589,10 @@ def tracker_status(settings: Settings) -> dict[str, Any]:
         "counts": {
             "jobs": len(jobs),
             "drafts": len(drafts),
-            "prepared": len(prepared),
+            "prepared": sum(1 for row in rows if row["state"] == "prepared_manual_submit"),
             "manual_submit_queue": sum(1 for row in rows if row["manual_submit_ready"]),
-            "submitted": len(submissions),
-            "unverified_submit_clicks": len(attempts),
+            "submitted": sum(1 for row in rows if row["state"] == "submitted"),
+            "unverified_submit_clicks": sum(1 for row in rows if row["state"] == "unverified_submit_click"),
             "approvals": len(approvals),
             "skipped": sum(1 for row in rows if row["state"] == "skipped"),
             "broken_links": sum(1 for row in rows if row["state"] == "broken_link"),
@@ -1068,8 +1077,7 @@ def render_onboarding_html(settings: Settings, status: dict[str, Any], *, messag
 
 
 def render_questions_html(settings: Settings, status: dict[str, Any], *, message: str = "") -> str:
-    queue = _read_json(question_queue_path(settings), {"questions": []})
-    questions = [item for item in queue.get("questions", []) if isinstance(item, dict)]
+    questions = visible_questions(settings)
     unanswered = unanswered_questions(settings)
     retry_status = read_retry_status(settings)
     retry_log = retry_log_path(settings)

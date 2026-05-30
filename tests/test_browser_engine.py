@@ -133,6 +133,21 @@ class BrowserEngineHelperTests(unittest.TestCase):
         self.assertEqual([fill["index"] for fill in fills], [0])
         self.assertEqual(errors, [])
 
+    def test_internal_select_names_are_rendered_as_human_review_items(self) -> None:
+        fields = [
+            {
+                "index": 0,
+                "type": "select-one",
+                "tag": "select",
+                "name": "cards[3da58b41-acf5-40a1-945e-c7f047ef8050][field0]",
+                "label": "cards[3da58b41-acf5-40a1-945e-c7f047ef8050][field0]",
+                "required": True,
+                "options": [{"text": "Yes", "value": "yes"}, {"text": "No", "value": "no"}],
+            }
+        ]
+        errors = _validate_required_fields(fields, [], {})
+        self.assertIn("Required select field needs manual review: required dropdown with options: Yes, No", errors)
+
     def test_citizenship_question_is_not_filled_with_candidate_name(self) -> None:
         field = {
             "index": 0,

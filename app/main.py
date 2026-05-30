@@ -203,6 +203,13 @@ async def _run_async(args: argparse.Namespace, settings: Settings) -> int:
             return 2
         draft_path = workflow.draft(args.job_id)
         draft = json.loads(draft_path.read_text(encoding="utf-8"))
+        cover_letter_path = draft.get("answers", {}).get("cover_letter_path")
+        if not cover_letter_path or str(cover_letter_path).startswith("needs_user_answer") or not Path(str(cover_letter_path)).exists():
+            generated_cover_letter = generate_cover_letter(settings, draft["job"])
+            draft["answers"]["cover_letter_path"] = str(generated_cover_letter)
+            draft["cover_letter_generated_at_prepare"] = str(generated_cover_letter)
+            draft_path.write_text(json.dumps(draft, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+            draft_path.chmod(0o600)
         config = load_autopilot(settings)
         result = await BrowserEngine(settings, recorder).prepare_application_for_manual_submit(
             str(draft["job"]["url"]),
@@ -243,6 +250,13 @@ async def _run_async(args: argparse.Namespace, settings: Settings) -> int:
         if not decision.allowed:
             print(json.dumps({"autopilot_allowed": False, "reasons": decision.reasons}, indent=2))
             return 2
+        cover_letter_path = draft.get("answers", {}).get("cover_letter_path")
+        if not cover_letter_path or str(cover_letter_path).startswith("needs_user_answer") or not Path(str(cover_letter_path)).exists():
+            generated_cover_letter = generate_cover_letter(settings, draft["job"])
+            draft["answers"]["cover_letter_path"] = str(generated_cover_letter)
+            draft["cover_letter_generated_at_auto_submit"] = str(generated_cover_letter)
+            draft_path.write_text(json.dumps(draft, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+            draft_path.chmod(0o600)
         result = await BrowserEngine(settings, recorder).auto_submit_application(
             str(draft["job"]["url"]),
             args.job_id,
