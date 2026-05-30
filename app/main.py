@@ -21,6 +21,7 @@ from .policy import PolicyViolation, RiskClass, require_typed_confirmation
 from .preferences import write_default_preferences
 from .profile_review import CONFIRM_PROFILE_PHRASE, build_profile_review, mark_profile_reviewed
 from .question_queue import add_questions
+from .question_retry import run_answered_question_retry
 from .telegram_notifier import TelegramConfigurationError, send_telegram_message, write_default_telegram
 from .tracker import format_manual_queue, format_tracker_text, format_tracker_chat, serve_tracker, tracker_status, write_tracker_html
 from .watchlist import write_default_watchlist
@@ -70,6 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--write-html", action="store_true", help="Write data/applications/tracker.html")
     manual_queue = sub.add_parser("manual-queue", help="List drafted/prepared jobs you can submit manually")
     manual_queue.add_argument("--limit", type=int, default=100)
+    retry_questions = sub.add_parser(
+        "retry-answered-questions",
+        help="Prepare jobs that were blocked on queued questions you have now answered",
+    )
+    retry_questions.add_argument("--limit", type=int, default=10)
     dashboard = sub.add_parser("dashboard", help="Serve the local-only tracker dashboard")
     dashboard.add_argument("--host", default=None)
     dashboard.add_argument("--port", type=int, default=None)
@@ -339,6 +345,10 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
         return 0
     if args.command == "manual-queue":
         print(format_manual_queue(tracker_status(settings), limit=args.limit))
+        return 0
+    if args.command == "retry-answered-questions":
+        status = run_answered_question_retry(settings, limit=args.limit)
+        print(json.dumps(status, indent=2, ensure_ascii=True))
         return 0
     if args.command == "dashboard":
         serve_tracker(settings, args.host, args.port)

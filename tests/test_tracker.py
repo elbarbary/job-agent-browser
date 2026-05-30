@@ -107,6 +107,8 @@ class TrackerTests(unittest.TestCase):
             self.assertIn("Local Web Search", render_search_html(settings, status))
             self.assertIn("Discovery Sources", render_search_html(settings, status))
             self.assertIn("Question Queue", render_questions_html(settings, status))
+            self.assertIn("Retry status", render_questions_html(settings, status))
+            self.assertIn("Go back and fill jobs with answered questions", render_questions_html(settings, status))
             self.assertIn("Draft answers", render_tracker_html(status))
             self.assertIn("Manual Submit Queue", format_manual_queue(status))
             self.assertIn("--prepare", format_manual_queue(status))

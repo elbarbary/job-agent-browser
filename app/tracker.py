@@ -22,6 +22,7 @@ from .cv_store import CVError, ingest_cv
 from .preferences import DEFAULT_USER_PREFERENCES, load_preferences
 from .profile_review import CONFIRM_PROFILE_PHRASE, build_profile_review, mark_profile_reviewed
 from .question_queue import question_queue_path, save_question_answers, unanswered_questions
+from .question_retry import read_retry_status, retry_log_path, start_answered_question_retry
 from .source_catalog import KNOWN_JOB_SOURCES
 from .watchlist import load_watchlist, watchlist_path
 
@@ -392,34 +393,18 @@ def _source_action(settings: Settings, form: dict[str, list[str]]) -> dict[str, 
 
 def _questions_action(settings: Settings, form: dict[str, list[str]]) -> dict[str, Any]:
     action = (form.get("action") or [""])[0]
+    answers = {
+        key.removeprefix("answer_"): value[0]
+        for key, value in form.items()
+        if key.startswith("answer_") and value
+    }
     if action == "save-question-answers":
-        answers = {
-            key.removeprefix("answer_"): value[0]
-            for key, value in form.items()
-            if key.startswith("answer_") and value
-        }
         path = save_question_answers(settings, answers)
         return {"ok": True, "output": f"Saved answers and synced them to onboarding defaults: {path}"}
     if action == "prepare-unanswered-jobs":
-        queue = _read_json(question_queue_path(settings), {"questions": []})
-        job_ids: list[str] = []
-        for item in queue.get("questions", []):
-            if not isinstance(item, dict) or not str(item.get("answer") or "").strip():
-                continue
-            job_ids.extend(str(job_id) for job_id in item.get("jobs", []))
-        unique_job_ids = sorted(set(job_ids))
-        if not unique_job_ids:
-            return {"ok": False, "output": "No answered queued questions are linked to jobs yet."}
-        outputs: list[str] = []
-        for job_id in unique_job_ids[:10]:
-            result = _run_command(
-                [str(settings.root / ".venv/bin/python"), "-m", "app.main", "apply", "--job-id", job_id, "--prepare"],
-                cwd=settings.root,
-                timeout=600,
-                input_text="",
-            )
-            outputs.append(f"{job_id}: {'ok' if result['ok'] else 'failed'}\n{result['output'][:1200]}")
-        return {"ok": True, "output": "\n\n".join(outputs)}
+        if answers:
+            save_question_answers(settings, answers)
+        return start_answered_question_retry(settings, limit=10)
     return {"ok": False, "output": f"Unknown questions action: {action}"}
 
 
@@ -1086,6 +1071,21 @@ def render_questions_html(settings: Settings, status: dict[str, Any], *, message
     queue = _read_json(question_queue_path(settings), {"questions": []})
     questions = [item for item in queue.get("questions", []) if isinstance(item, dict)]
     unanswered = unanswered_questions(settings)
+    retry_status = read_retry_status(settings)
+    retry_log = retry_log_path(settings)
+    log_tail = ""
+    if retry_log.exists():
+        lines = retry_log.read_text(encoding="utf-8", errors="replace").splitlines()
+        log_tail = "\n".join(lines[-40:])
+    retry_summary = "No retry batch has run yet."
+    if retry_status:
+        retry_summary = (
+            f"{retry_status.get('status', 'unknown')} | "
+            f"{len(retry_status.get('completed') or [])} completed | "
+            f"{len(retry_status.get('failed') or [])} failed | "
+            f"{len(retry_status.get('skipped') or [])} skipped | "
+            f"{len(retry_status.get('job_ids') or [])} queued"
+        )
     rows = []
     for item in questions:
         item_id = html.escape(str(item.get("id") or ""))
@@ -1106,13 +1106,14 @@ def render_questions_html(settings: Settings, status: dict[str, Any], *, message
       <h2>Question Queue</h2>
       <p>{len(unanswered)} unanswered questions. When a form has a required question the AI cannot answer from your CV or saved preferences, it appears here. Your answer is synced into onboarding defaults so the AI can retry filling those jobs.</p>
       <form method="post" action="/questions-action">
-        <input type="hidden" name="action" value="save-question-answers">
         {''.join(rows) or '<p>No queued questions yet.</p>'}
-        <button type="submit">Save answers to onboarding defaults</button>
-      </form>
-      <form method="post" action="/questions-action">
+        <button type="submit" name="action" value="save-question-answers">Save answers to onboarding defaults</button>
         <button class="secondary" name="action" value="prepare-unanswered-jobs">Go back and fill jobs with answered questions</button>
       </form>
+      <h3>Retry status</h3>
+      <p>{html.escape(retry_summary)}</p>
+      <p><code>{html.escape(str(retry_log))}</code></p>
+      <pre>{html.escape(log_tail or 'No retry log yet.')}</pre>
     </section>
     """
     return _dashboard_shell(title="Questions", generated_at=status["generated_at"], body=body, active_path="/questions", message=message)
