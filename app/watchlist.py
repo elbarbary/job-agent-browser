@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
-from .source_catalog import source_names
+from .source_catalog import all_source_urls, source_names
 
 
 DEFAULT_WATCHLIST: dict[str, Any] = {
@@ -27,6 +27,7 @@ DEFAULT_WATCHLIST: dict[str, Any] = {
     "queries_enabled": False,
     "max_results_per_query": 5,
     "enabled_source_names": source_names(),
+    "source_site_urls": all_source_urls(),
     "queries": [
         {"query": "software engineer", "location": "remote"},
         {"query": "machine learning engineer", "location": "remote"},
@@ -37,7 +38,8 @@ DEFAULT_WATCHLIST: dict[str, Any] = {
     "notes": [
         "Discovery mode can be online, source_urls, both, or alternate.",
         "Online discovery uses public feeds and optional local SearXNG searches across the enabled source catalog.",
-        "Source URL discovery follows job URLs you add manually.",
+        "source_site_urls contains popular public job-board and ATS start pages. Direct source_urls should be individual job posting URLs.",
+        "Source URL discovery follows individual job URLs you add manually.",
         "The worker drafts locally only for jobs at or above min_auto_draft_score. Autopilot submissions require private autopilot.json authorization.",
     ],
 }

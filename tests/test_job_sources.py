@@ -3,15 +3,19 @@ from __future__ import annotations
 import unittest
 
 from app.job_sources import FeedItem, _looks_relevant, clean_html, make_job_id
-from app.source_catalog import all_source_domains
+from app.source_catalog import all_source_domains, all_source_urls
 from app.web_search import build_job_search_terms
 
 
 class JobSourcesTests(unittest.TestCase):
     def test_catalog_feeds_search_terms(self) -> None:
         domains = all_source_domains()
+        urls = all_source_urls()
         self.assertIn("jobs.lever.co", domains)
         self.assertIn("myworkdayjobs.com", domains)
+        self.assertIn("https://www.linkedin.com/jobs/", urls)
+        self.assertIn("https://www.indeed.com/", urls)
+        self.assertIn("https://swissdevjobs.ch/jobs/all", urls)
         terms = build_job_search_terms("AI product", "Switzerland", ["jobs.lever.co", "jobs.ashbyhq.com"])
         self.assertIn("site:jobs.lever.co", terms)
         self.assertIn("site:jobs.ashbyhq.com", terms)

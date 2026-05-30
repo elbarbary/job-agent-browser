@@ -380,6 +380,7 @@ def _source_action(settings: Settings, form: dict[str, list[str]]) -> dict[str, 
     watchlist["source_url_timeout_seconds"] = int((form.get("source_url_timeout_seconds") or ["120"])[0] or "120")
     watchlist["max_results_per_query"] = int((form.get("max_results_per_query") or ["5"])[0] or "5")
     watchlist["queries"] = _parse_query_lines((form.get("queries") or [""])[0])
+    watchlist["source_site_urls"] = [item["url"] for item in _parse_source_urls((form.get("source_site_urls") or [""])[0])]
     watchlist["source_urls"] = _parse_source_urls((form.get("source_urls") or [""])[0])
     selected_sources = form.get("enabled_source_names") or []
     watchlist["enabled_source_names"] = selected_sources or [str(item["name"]) for item in KNOWN_JOB_SOURCES]
@@ -918,6 +919,7 @@ def render_search_html(settings: Settings, status: dict[str, Any], *, query: str
         )
     )
     queries_text = html.escape(_format_query_lines(watchlist.get("queries") or []))
+    source_site_urls_text = html.escape("\n".join(str(url) for url in (watchlist.get("source_site_urls") or [])))
     source_urls_text = html.escape(_format_source_urls(watchlist.get("source_urls") or []))
     results_html = ""
     if query:
@@ -967,7 +969,11 @@ def render_search_html(settings: Settings, status: dict[str, Any], *, query: str
         <label>Online queries, one per line as <code>query | location</code><br>
           <textarea name="queries" rows="7">{queries_text}</textarea>
         </label><br><br>
-        <label>Source URLs, one job URL per line<br>
+        <label>Popular source site URLs<br>
+          <textarea name="source_site_urls" rows="10" placeholder="https://www.linkedin.com/jobs/">{source_site_urls_text}</textarea>
+        </label>
+        <p>These are broad job-board/ATS entry points and are used as committed source seeds and UI reference. Online discovery searches across the selected sources above.</p>
+        <label>Direct job posting source URLs, one job URL per line<br>
           <textarea name="source_urls" rows="7" placeholder="https://jobs.lever.co/company/job-id">{source_urls_text}</textarea>
         </label><br><br>
         <details open><summary>Known job websites / ATS sources</summary>{source_checks}</details>
