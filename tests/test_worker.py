@@ -38,7 +38,11 @@ class WorkerSelectionTests(unittest.TestCase):
             self.assertEqual(_discovery_plan(settings, {"discovery_mode": "alternate"}), (True, False, "online"))
             settings.ensure_directories()
             (settings.applications_dir / "worker_status.json").write_text('{"discovery_lane": "online"}')
-            self.assertEqual(_discovery_plan(settings, {"discovery_mode": "alternate"}), (False, True, "source_urls"))
+            self.assertEqual(
+                _discovery_plan(settings, {"discovery_mode": "alternate", "source_urls": ["https://jobs.example.test/1"]}),
+                (False, True, "source_urls"),
+            )
+            self.assertEqual(_discovery_plan(settings, {"discovery_mode": "alternate", "source_urls": []}), (True, False, "online"))
 
     def test_worker_source_url_timeout_default_is_configured(self) -> None:
         from app.watchlist import DEFAULT_WATCHLIST

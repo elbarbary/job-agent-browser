@@ -80,10 +80,19 @@ def _discovery_plan(settings: Settings, watchlist: dict[str, Any]) -> tuple[bool
         return False, True, "source_urls"
     if mode == "both":
         return True, True, "both"
+    if not watchlist.get("source_urls"):
+        return True, False, "online"
     last_lane = _last_discovery_lane(settings)
     if last_lane == "online":
         return False, True, "source_urls"
     return True, False, "online"
+
+
+def _write_worker_status(settings: Settings, status: dict[str, Any]) -> Path:
+    status_path = settings.applications_dir / "worker_status.json"
+    status_path.write_text(json.dumps(status, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    status_path.chmod(0o600)
+    return status_path
 
 
 async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[str, Any]:
@@ -166,6 +175,29 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
     ranked = sorted(existing.values(), key=lambda item: int(item.get("match_score", 0)), reverse=True)
     repository.save_jobs(ranked)
 
+    min_score = int(watchlist.get("min_auto_draft_score", 45))
+    discovery_status = {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "phase": "discovery_complete",
+        "in_progress": True,
+        "jobs_known": len(ranked),
+        "jobs_found_this_run": len(found),
+        "discovery_mode": str(watchlist.get("discovery_mode") or "alternate"),
+        "discovery_lane": discovery_lane,
+        "run_online_sources": run_online,
+        "run_source_urls": run_source_urls,
+        "source_urls_per_cycle": int(watchlist.get("source_urls_per_cycle", 10)),
+        "source_url_timeout_seconds": int(watchlist.get("source_url_timeout_seconds", 120)),
+        "eligible_jobs": len([job for job in ranked if _job_score(job) >= min_score]),
+        "drafted_job_ids": [],
+        "autopilot_submitted_job_ids": [],
+        "autopilot_blocked": [],
+        "daily_update": None,
+        "audit_log": str(recorder.path),
+        "errors": errors,
+    }
+    _write_worker_status(settings, discovery_status)
+
     drafted: list[str] = []
     autopilot_submitted: list[str] = []
     autopilot_blocked: list[dict[str, Any]] = []
@@ -176,7 +208,6 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
     autopilot_config = load_autopilot(settings)
     max_autopilot_submits = int(autopilot_config.get("max_submissions_per_run", 1))
     browser_engine = BrowserEngine(settings, recorder)
-    min_score = int(watchlist.get("min_auto_draft_score", 45))
     draft_top_n = int(watchlist.get("auto_draft_top_n", 5))
     autopilot_scan_top_n = int(
         watchlist.get("autopilot_scan_top_n", max(draft_top_n, max_autopilot_submits * 3))
@@ -254,6 +285,8 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
     report = generate_daily_update(settings)
     status = {
         "generated_at": datetime.now(UTC).isoformat(),
+        "phase": "complete",
+        "in_progress": False,
         "jobs_known": len(ranked),
         "jobs_found_this_run": len(found),
         "discovery_mode": str(watchlist.get("discovery_mode") or "alternate"),
@@ -273,9 +306,7 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         "audit_log": str(recorder.path),
         "errors": errors,
     }
-    status_path = settings.applications_dir / "worker_status.json"
-    status_path.write_text(json.dumps(status, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
-    status_path.chmod(0o600)
+    status_path = _write_worker_status(settings, status)
     telegram_config = load_telegram_config(settings)
     tracker_message = ""
     if telegram_ready(telegram_config) and telegram_config.get("notify_on_worker_run"):
