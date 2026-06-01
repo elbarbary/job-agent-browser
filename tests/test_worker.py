@@ -3,7 +3,13 @@ from __future__ import annotations
 import unittest
 
 from app.config import Settings
-from app.worker import _discovery_plan, select_worker_jobs
+from app.worker import (
+    DEFAULT_WORKER_CYCLE_TIMEOUT_SECONDS,
+    _new_worker_status,
+    _update_worker_status,
+    _discovery_plan,
+    select_worker_jobs,
+)
 
 
 class WorkerSelectionTests(unittest.TestCase):
@@ -48,6 +54,32 @@ class WorkerSelectionTests(unittest.TestCase):
         from app.watchlist import DEFAULT_WATCHLIST
 
         self.assertEqual(DEFAULT_WATCHLIST["source_url_timeout_seconds"], 120)
+
+    def test_worker_status_helpers_include_heartbeat_and_completion_timestamps(self) -> None:
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings.load(Path(tmp))
+            settings.ensure_directories()
+            status = _new_worker_status(
+                watchlist={"discovery_mode": "alternate"},
+                phase="starting",
+                in_progress=True,
+                started_at="2026-01-01T00:00:00+00:00",
+            )
+            self.assertEqual(status["phase"], "starting")
+            self.assertIsNone(status["finished_at"])
+            _update_worker_status(settings, status, phase="complete", in_progress=False)
+            written = json.loads((settings.applications_dir / "worker_status.json").read_text(encoding="utf-8"))
+            self.assertEqual(written["phase"], "complete")
+            self.assertFalse(written["in_progress"])
+            self.assertIsNotNone(written["updated_at"])
+            self.assertIsNotNone(written["finished_at"])
+
+    def test_worker_cycle_timeout_default_is_bounded(self) -> None:
+        self.assertGreaterEqual(DEFAULT_WORKER_CYCLE_TIMEOUT_SECONDS, 60)
 
 
 if __name__ == "__main__":

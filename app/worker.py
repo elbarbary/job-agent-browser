@@ -27,6 +27,7 @@ from .whatsapp_notifier import WhatsAppConfigurationError, load_whatsapp_config,
 
 
 LOGGER = logging.getLogger("job_agent_worker")
+DEFAULT_WORKER_CYCLE_TIMEOUT_SECONDS = 3600
 
 
 def _job_score(job: dict[str, Any]) -> int:
@@ -95,6 +96,48 @@ def _write_worker_status(settings: Settings, status: dict[str, Any]) -> Path:
     return status_path
 
 
+def _update_worker_status(settings: Settings, status: dict[str, Any], **updates: Any) -> Path:
+    status.update(updates)
+    status["updated_at"] = datetime.now(UTC).isoformat()
+    if not status.get("in_progress"):
+        status["finished_at"] = status["updated_at"]
+    return _write_worker_status(settings, status)
+
+
+def _new_worker_status(
+    *,
+    watchlist: dict[str, Any],
+    phase: str,
+    in_progress: bool,
+    started_at: str | None = None,
+    errors: list[str] | None = None,
+) -> dict[str, Any]:
+    now = datetime.now(UTC).isoformat()
+    return {
+        "generated_at": now,
+        "updated_at": now,
+        "started_at": started_at or now,
+        "finished_at": None if in_progress else now,
+        "phase": phase,
+        "in_progress": in_progress,
+        "jobs_known": 0,
+        "jobs_found_this_run": 0,
+        "discovery_mode": str(watchlist.get("discovery_mode") or "alternate"),
+        "discovery_lane": None,
+        "run_online_sources": None,
+        "run_source_urls": None,
+        "source_urls_per_cycle": int(watchlist.get("source_urls_per_cycle", 10)),
+        "source_url_timeout_seconds": int(watchlist.get("source_url_timeout_seconds", 120)),
+        "eligible_jobs": 0,
+        "drafted_job_ids": [],
+        "autopilot_submitted_job_ids": [],
+        "autopilot_blocked": [],
+        "daily_update": None,
+        "audit_log": None,
+        "errors": errors or [],
+    }
+
+
 async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[str, Any]:
     settings.ensure_directories()
     watchlist = load_watchlist(settings)
@@ -103,7 +146,19 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
     existing = {str(job.get("url")): job for job in repository.load_jobs()}
     found: list[dict[str, Any]] = []
     errors: list[str] = []
+    started_at = datetime.now(UTC).isoformat()
     run_online, run_source_urls, discovery_lane = _discovery_plan(settings, watchlist)
+    status = _new_worker_status(watchlist=watchlist, phase="starting", in_progress=True, started_at=started_at)
+    status.update(
+        {
+            "discovery_lane": discovery_lane,
+            "run_online_sources": run_online,
+            "run_source_urls": run_source_urls,
+            "audit_log": str(recorder.path),
+        }
+    )
+    _write_worker_status(settings, status)
+    _update_worker_status(settings, status, phase="discovering")
 
     if run_online and watchlist.get("public_feeds_enabled", True):
         try:
@@ -178,6 +233,9 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
     min_score = int(watchlist.get("min_auto_draft_score", 45))
     discovery_status = {
         "generated_at": datetime.now(UTC).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
+        "started_at": started_at,
+        "finished_at": None,
         "phase": "discovery_complete",
         "in_progress": True,
         "jobs_known": len(ranked),
@@ -197,6 +255,7 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         "errors": errors,
     }
     _write_worker_status(settings, discovery_status)
+    status = discovery_status
 
     drafted: list[str] = []
     autopilot_submitted: list[str] = []
@@ -219,6 +278,18 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         autopilot_scan_top_n=autopilot_scan_top_n,
     )
     draft_paths: dict[str, Path] = {}
+    _update_worker_status(
+        settings,
+        status,
+        phase="drafting",
+        auto_draft_top_n=draft_top_n,
+        autopilot_scan_top_n=autopilot_scan_top_n,
+        max_autopilot_submissions_per_run=max_autopilot_submits,
+        drafted_job_ids=drafted,
+        autopilot_submitted_job_ids=autopilot_submitted,
+        autopilot_blocked=autopilot_blocked,
+        errors=errors,
+    )
     for job in draftable_jobs:
         job_id = str(job["id"])
         advisory = None
@@ -230,14 +301,26 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         draft_path = workflow.draft(job_id, advisory)
         draft_paths[job_id] = draft_path
         drafted.append(job_id)
+        _update_worker_status(settings, status, drafted_job_ids=drafted, errors=errors)
 
+    _update_worker_status(
+        settings,
+        status,
+        phase="autopilot",
+        drafted_job_ids=drafted,
+        autopilot_submitted_job_ids=autopilot_submitted,
+        autopilot_blocked=autopilot_blocked,
+        errors=errors,
+    )
     for job in autopilot_candidates:
         job_id = str(job["id"])
         if repository.has_submission(job_id):
             autopilot_blocked.append({"job_id": job_id, "reasons": ["job already has a local submission record"]})
+            _update_worker_status(settings, status, autopilot_blocked=autopilot_blocked)
             continue
         if repository.has_submission_attempt(job_id):
             autopilot_blocked.append({"job_id": job_id, "reasons": ["job already has an unverified submit-click record"]})
+            _update_worker_status(settings, status, autopilot_blocked=autopilot_blocked)
             continue
         if len(autopilot_submitted) >= max_autopilot_submits:
             break
@@ -252,6 +335,7 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
             draft_path = workflow.draft(job_id, advisory)
             draft_paths[job_id] = draft_path
             drafted.append(job_id)
+            _update_worker_status(settings, status, drafted_job_ids=drafted, errors=errors)
         try:
             draft_payload = json.loads(draft_path.read_text(encoding="utf-8"))
             decision = decide_autopilot_for_job(
@@ -261,6 +345,7 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
             )
             if not decision.allowed:
                 autopilot_blocked.append({"job_id": job_id, "reasons": decision.reasons})
+                _update_worker_status(settings, status, autopilot_blocked=autopilot_blocked)
                 continue
             result = await browser_engine.auto_submit_application(
                 str(job["url"]),
@@ -271,20 +356,27 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
             if result.get("submitted"):
                 workflow.record_autopilot_submission(job_id, result)
                 autopilot_submitted.append(job_id)
+                _update_worker_status(settings, status, autopilot_submitted_job_ids=autopilot_submitted)
             elif result.get("clicked"):
                 workflow.record_autopilot_attempt(job_id, result)
                 autopilot_blocked.append(
                     {"job_id": job_id, "reasons": result.get("errors", ["submit click was unverified"])}
                 )
+                _update_worker_status(settings, status, autopilot_blocked=autopilot_blocked)
             else:
                 autopilot_blocked.append({"job_id": job_id, "reasons": result.get("errors", [])})
+                _update_worker_status(settings, status, autopilot_blocked=autopilot_blocked)
         except Exception as exc:
             errors.append(f"Autopilot failed for {job_id}: {exc}")
             LOGGER.exception("autopilot failed for %s", job_id)
+            _update_worker_status(settings, status, errors=errors, autopilot_blocked=autopilot_blocked)
 
     report = generate_daily_update(settings)
     status = {
         "generated_at": datetime.now(UTC).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
+        "started_at": started_at,
+        "finished_at": None,
         "phase": "complete",
         "in_progress": False,
         "jobs_known": len(ranked),
@@ -306,6 +398,7 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         "audit_log": str(recorder.path),
         "errors": errors,
     }
+    status["finished_at"] = status["updated_at"]
     status_path = _write_worker_status(settings, status)
     telegram_config = load_telegram_config(settings)
     tracker_message = ""
@@ -338,8 +431,17 @@ async def run_forever(settings: Settings, interval_minutes: int | None = None) -
     interval = int(interval_minutes or watchlist.get("interval_minutes", 180))
     LOGGER.info("worker starting with interval_minutes=%s", interval)
     while True:
+        watchlist = load_watchlist(settings)
+        timeout_seconds = max(60, int(watchlist.get("worker_cycle_timeout_seconds", DEFAULT_WORKER_CYCLE_TIMEOUT_SECONDS)))
         try:
-            await run_once(settings)
-        except Exception:
+            await asyncio.wait_for(run_once(settings), timeout=timeout_seconds)
+        except Exception as exc:
             LOGGER.exception("worker run failed")
+            failed_status = _new_worker_status(
+                watchlist=watchlist,
+                phase="failed",
+                in_progress=False,
+                errors=[f"worker run failed: {exc}"],
+            )
+            _write_worker_status(settings, failed_status)
         await asyncio.sleep(max(1, interval) * 60)
