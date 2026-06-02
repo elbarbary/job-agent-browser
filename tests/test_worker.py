@@ -4,10 +4,12 @@ import unittest
 
 from app.config import Settings
 from app.worker import (
+    DEFAULT_AUTOPILOT_JOB_TIMEOUT_SECONDS,
     DEFAULT_WORKER_CYCLE_TIMEOUT_SECONDS,
     _new_worker_status,
     _update_worker_status,
     _discovery_plan,
+    _existing_job_ids,
     select_worker_jobs,
 )
 
@@ -31,6 +33,23 @@ class WorkerSelectionTests(unittest.TestCase):
             [job["id"] for job in autopilot_candidates],
             ["job-1", "job-2", "job-3", "job-4", "job-5", "job-6"],
         )
+
+    def test_autopilot_scan_skips_already_handled_jobs(self) -> None:
+        ranked = [
+            {"id": f"job-{index}", "match_score": score}
+            for index, score in enumerate([100, 95, 90, 85, 80, 75, 70, 65], start=1)
+        ]
+
+        draft_jobs, autopilot_candidates = select_worker_jobs(
+            ranked,
+            min_score=70,
+            draft_top_n=2,
+            autopilot_scan_top_n=4,
+            handled_job_ids={"job-1", "job-2", "job-3"},
+        )
+
+        self.assertEqual([job["id"] for job in draft_jobs], ["job-1", "job-2"])
+        self.assertEqual([job["id"] for job in autopilot_candidates], ["job-4", "job-5", "job-6", "job-7"])
 
     def test_discovery_modes_include_alternate(self) -> None:
         import tempfile
@@ -80,6 +99,20 @@ class WorkerSelectionTests(unittest.TestCase):
 
     def test_worker_cycle_timeout_default_is_bounded(self) -> None:
         self.assertGreaterEqual(DEFAULT_WORKER_CYCLE_TIMEOUT_SECONDS, 60)
+
+    def test_autopilot_job_timeout_default_is_bounded(self) -> None:
+        self.assertGreaterEqual(DEFAULT_AUTOPILOT_JOB_TIMEOUT_SECONDS, 30)
+
+    def test_existing_job_ids_reads_json_stems(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "abc.json").write_text("{}")
+            (directory / "ignore.txt").write_text("{}")
+
+            self.assertEqual(_existing_job_ids(directory), {"abc"})
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ from .whatsapp_notifier import WhatsAppConfigurationError, load_whatsapp_config,
 
 LOGGER = logging.getLogger("job_agent_worker")
 DEFAULT_WORKER_CYCLE_TIMEOUT_SECONDS = 3600
+DEFAULT_AUTOPILOT_JOB_TIMEOUT_SECONDS = 300
 
 
 def _job_score(job: dict[str, Any]) -> int:
@@ -43,10 +44,19 @@ def select_worker_jobs(
     min_score: int,
     draft_top_n: int,
     autopilot_scan_top_n: int,
+    handled_job_ids: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Return visible drafts and the wider autopilot candidate scan window."""
     eligible = [job for job in ranked_jobs if _job_score(job) >= min_score]
-    return eligible[: max(0, draft_top_n)], eligible[: max(0, autopilot_scan_top_n)]
+    handled_job_ids = handled_job_ids or set()
+    autopilot_eligible = [job for job in eligible if str(job.get("id")) not in handled_job_ids]
+    return eligible[: max(0, draft_top_n)], autopilot_eligible[: max(0, autopilot_scan_top_n)]
+
+
+def _existing_job_ids(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    return {item.stem for item in path.glob("*.json") if item.is_file()}
 
 
 def setup_logging(settings: Settings) -> Path:
@@ -266,6 +276,10 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
     llm = LocalLLMClient(settings) if use_llm else None
     autopilot_config = load_autopilot(settings)
     max_autopilot_submits = int(autopilot_config.get("max_submissions_per_run", 1))
+    autopilot_job_timeout = max(
+        30,
+        int(autopilot_config.get("autopilot_job_timeout_seconds", DEFAULT_AUTOPILOT_JOB_TIMEOUT_SECONDS)),
+    )
     browser_engine = BrowserEngine(settings, recorder)
     draft_top_n = int(watchlist.get("auto_draft_top_n", 5))
     autopilot_scan_top_n = int(
@@ -276,6 +290,10 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         min_score=min_score,
         draft_top_n=draft_top_n,
         autopilot_scan_top_n=autopilot_scan_top_n,
+        handled_job_ids=(
+            _existing_job_ids(settings.applications_dir / "submissions")
+            | _existing_job_ids(settings.applications_dir / "submission_attempts")
+        ),
     )
     draft_paths: dict[str, Path] = {}
     _update_worker_status(
@@ -285,6 +303,7 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         auto_draft_top_n=draft_top_n,
         autopilot_scan_top_n=autopilot_scan_top_n,
         max_autopilot_submissions_per_run=max_autopilot_submits,
+        autopilot_job_timeout_seconds=autopilot_job_timeout,
         drafted_job_ids=drafted,
         autopilot_submitted_job_ids=autopilot_submitted,
         autopilot_blocked=autopilot_blocked,
@@ -347,29 +366,76 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
                 autopilot_blocked.append({"job_id": job_id, "reasons": decision.reasons})
                 _update_worker_status(settings, status, autopilot_blocked=autopilot_blocked)
                 continue
-            result = await browser_engine.auto_submit_application(
-                str(job["url"]),
-                job_id,
-                draft_payload["answers"],
-                autopilot_config,
+            _update_worker_status(
+                settings,
+                status,
+                current_autopilot_job_id=job_id,
+                autopilot_attempt_started_at=datetime.now(UTC).isoformat(),
+            )
+            result = await asyncio.wait_for(
+                browser_engine.auto_submit_application(
+                    str(job["url"]),
+                    job_id,
+                    draft_payload["answers"],
+                    autopilot_config,
+                ),
+                timeout=autopilot_job_timeout,
             )
             if result.get("submitted"):
                 workflow.record_autopilot_submission(job_id, result)
                 autopilot_submitted.append(job_id)
-                _update_worker_status(settings, status, autopilot_submitted_job_ids=autopilot_submitted)
+                _update_worker_status(
+                    settings,
+                    status,
+                    autopilot_submitted_job_ids=autopilot_submitted,
+                    current_autopilot_job_id=None,
+                    autopilot_attempt_started_at=None,
+                )
             elif result.get("clicked"):
                 workflow.record_autopilot_attempt(job_id, result)
                 autopilot_blocked.append(
                     {"job_id": job_id, "reasons": result.get("errors", ["submit click was unverified"])}
                 )
-                _update_worker_status(settings, status, autopilot_blocked=autopilot_blocked)
+                _update_worker_status(
+                    settings,
+                    status,
+                    autopilot_blocked=autopilot_blocked,
+                    current_autopilot_job_id=None,
+                    autopilot_attempt_started_at=None,
+                )
             else:
                 autopilot_blocked.append({"job_id": job_id, "reasons": result.get("errors", [])})
-                _update_worker_status(settings, status, autopilot_blocked=autopilot_blocked)
+                _update_worker_status(
+                    settings,
+                    status,
+                    autopilot_blocked=autopilot_blocked,
+                    current_autopilot_job_id=None,
+                    autopilot_attempt_started_at=None,
+                )
+        except TimeoutError:
+            reason = f"autopilot attempt timed out after {autopilot_job_timeout}s"
+            autopilot_blocked.append({"job_id": job_id, "reasons": [reason]})
+            LOGGER.warning("autopilot timed out for %s after %ss", job_id, autopilot_job_timeout)
+            _update_worker_status(
+                settings,
+                status,
+                autopilot_blocked=autopilot_blocked,
+                current_autopilot_job_id=None,
+                autopilot_attempt_started_at=None,
+            )
         except Exception as exc:
             errors.append(f"Autopilot failed for {job_id}: {exc}")
             LOGGER.exception("autopilot failed for %s", job_id)
-            _update_worker_status(settings, status, errors=errors, autopilot_blocked=autopilot_blocked)
+            _update_worker_status(
+                settings,
+                status,
+                errors=errors,
+                autopilot_blocked=autopilot_blocked,
+                current_autopilot_job_id=None,
+                autopilot_attempt_started_at=None,
+            )
+
+    _update_worker_status(settings, status, current_autopilot_job_id=None, autopilot_attempt_started_at=None)
 
     report = generate_daily_update(settings)
     status = {
@@ -391,6 +457,7 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         "auto_draft_top_n": draft_top_n,
         "autopilot_scan_top_n": autopilot_scan_top_n,
         "max_autopilot_submissions_per_run": max_autopilot_submits,
+        "autopilot_job_timeout_seconds": autopilot_job_timeout,
         "drafted_job_ids": drafted,
         "autopilot_submitted_job_ids": autopilot_submitted,
         "autopilot_blocked": autopilot_blocked,
