@@ -9,6 +9,7 @@ from app.worker import (
     _new_worker_status,
     _update_worker_status,
     _discovery_plan,
+    _draft_path,
     _existing_job_ids,
     select_worker_jobs,
 )
@@ -113,6 +114,18 @@ class WorkerSelectionTests(unittest.TestCase):
             (directory / "ignore.txt").write_text("{}")
 
             self.assertEqual(_existing_job_ids(directory), {"abc"})
+
+    def test_draft_path_points_to_private_drafts_directory(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings.load(Path(tmp))
+
+            self.assertEqual(
+                _draft_path(settings, "abc123"),
+                settings.applications_dir / "drafts" / "abc123.json",
+            )
 
 
 if __name__ == "__main__":

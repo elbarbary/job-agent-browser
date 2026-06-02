@@ -59,6 +59,10 @@ def _existing_job_ids(path: Path) -> set[str]:
     return {item.stem for item in path.glob("*.json") if item.is_file()}
 
 
+def _draft_path(settings: Settings, job_id: str) -> Path:
+    return settings.applications_dir / "drafts" / f"{job_id}.json"
+
+
 def setup_logging(settings: Settings) -> Path:
     settings.ensure_directories()
     path = settings.log_dir / "worker.log"
@@ -311,6 +315,12 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
     )
     for job in draftable_jobs:
         job_id = str(job["id"])
+        existing_draft = _draft_path(settings, job_id)
+        if existing_draft.exists():
+            draft_paths[job_id] = existing_draft
+            drafted.append(job_id)
+            _update_worker_status(settings, status, drafted_job_ids=drafted, errors=errors)
+            continue
         advisory = None
         if llm:
             try:
@@ -344,6 +354,11 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         if len(autopilot_submitted) >= max_autopilot_submits:
             break
         draft_path = draft_paths.get(job_id)
+        if draft_path is None:
+            existing_draft = _draft_path(settings, job_id)
+            if existing_draft.exists():
+                draft_path = existing_draft
+                draft_paths[job_id] = draft_path
         if draft_path is None:
             advisory = None
             if llm:
