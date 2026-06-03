@@ -10,6 +10,7 @@ from app.browser_engine import (
     _answer_for_field,
     _is_cover_letter_file_field,
     _is_resume_file_field,
+    _llm_form_planner_timeout,
     _planner_fill,
     _plan_form_fills,
     _post_submit_errors,
@@ -76,6 +77,26 @@ class BrowserEngineHelperTests(unittest.TestCase):
         self.assertIsNotNone(action)
         self.assertEqual(action["index"], 2)
         self.assertIn("field_count", APPLICATION_NAVIGATION_SCRIPT)
+
+    def test_llm_form_planner_timeout_is_bounded_below_job_timeout(self) -> None:
+        self.assertEqual(
+            _llm_form_planner_timeout(
+                {
+                    "llm_form_planner_timeout_seconds": 120,
+                    "autopilot_job_timeout_seconds": 90,
+                }
+            ),
+            30.0,
+        )
+        self.assertEqual(
+            _llm_form_planner_timeout(
+                {
+                    "llm_form_planner_timeout_seconds": "bad",
+                    "autopilot_job_timeout_seconds": 20,
+                }
+            ),
+            5.0,
+        )
 
     def test_llm_planner_fill_can_only_use_known_answer_keys(self) -> None:
         fields = [{"index": 0, "type": "email", "tag": "input", "label": "Email", "required": True}]

@@ -1477,7 +1477,7 @@ def _plan_form_with_local_llm(
     config: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], int | None, list[str]]:
     try:
-        llm = LocalLLMClient(settings, timeout=float(config.get("llm_form_planner_timeout_seconds", 120)))
+        llm = LocalLLMClient(settings, timeout=_llm_form_planner_timeout(config))
         raw_plan = llm.chat(_form_planner_prompt(snapshot, answers, config))
         plan = _extract_json_object(raw_plan)
     except (LocalLLMError, ValueError, TypeError, json.JSONDecodeError):
@@ -1501,6 +1501,21 @@ def _plan_form_with_local_llm(
     if isinstance(requested_submit, int) and _safe_submit_button_index(buttons, requested_submit):
         submit_index = requested_submit
     return fills, submit_index, []
+
+
+def _llm_form_planner_timeout(config: dict[str, Any]) -> float:
+    raw_timeout = config.get("llm_form_planner_timeout_seconds", 20)
+    try:
+        configured = float(raw_timeout)
+    except (TypeError, ValueError):
+        configured = 20.0
+    raw_job_timeout = config.get("autopilot_job_timeout_seconds", 90)
+    try:
+        job_timeout = float(raw_job_timeout)
+    except (TypeError, ValueError):
+        job_timeout = 90.0
+    # Leave time for browser navigation, deterministic fills, submit, and audit logging.
+    return max(5.0, min(configured, job_timeout - 30.0, 30.0))
 
 
 def _form_planner_prompt(

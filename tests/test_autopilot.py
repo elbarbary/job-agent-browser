@@ -24,6 +24,7 @@ class AutopilotTests(unittest.TestCase):
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertFalse(autopilot_enabled(config))
             self.assertEqual(config["allowed_submit_hosts"], [])
+            self.assertEqual(config["llm_form_planner_timeout_seconds"], 20)
 
     def test_standing_authorization_and_host_allowlist_are_required(self) -> None:
         config = {

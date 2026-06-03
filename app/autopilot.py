@@ -34,7 +34,7 @@ DEFAULT_AUTOPILOT: dict[str, Any] = {
     "allow_application_terms_checkbox": False,
     "application_navigation_max_steps": 3,
     "use_llm_form_planner": True,
-    "llm_form_planner_timeout_seconds": 120,
+    "llm_form_planner_timeout_seconds": 20,
     "notes": [
         f"Set standing_authorization exactly to: {AUTHORIZATION_PHRASE}",
         "Keep this file private. It represents standing permission to submit eligible applications.",
