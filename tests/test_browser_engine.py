@@ -8,6 +8,8 @@ from app.browser_engine import (
     _is_arbeitnow_job_page,
     _choose_application_entry_action,
     _answer_for_field,
+    _challenge_detected,
+    _direct_ats_adapter_for_url,
     _is_cover_letter_file_field,
     _is_resume_file_field,
     _llm_form_planner_timeout,
@@ -33,6 +35,18 @@ class BrowserEngineHelperTests(unittest.TestCase):
             )
         )
         self.assertFalse(_is_arbeitnow_job_page("https://jobs.lever.co/example/123"))
+
+    def test_direct_ats_adapter_routing(self) -> None:
+        self.assertEqual(_direct_ats_adapter_for_url("https://jobs.lever.co/company/role"), "lever")
+        self.assertEqual(_direct_ats_adapter_for_url("https://boards.greenhouse.io/company/jobs/1"), "greenhouse")
+        self.assertEqual(_direct_ats_adapter_for_url("https://jobs.ashbyhq.com/company/role"), "ashby")
+        self.assertEqual(_direct_ats_adapter_for_url("https://apply.workable.com/company/j/ABC"), "workable")
+        self.assertIsNone(_direct_ats_adapter_for_url("https://example.com/job"))
+
+    def test_challenge_detection_blocks_captcha_pages(self) -> None:
+        self.assertTrue(_challenge_detected({"selector_match": True, "text": ""}))
+        self.assertTrue(_challenge_detected({"title": "Verify you are human", "text": "captcha required"}))
+        self.assertFalse(_challenge_detected({"title": "Software Engineer", "text": "Apply now"}))
 
     def test_submission_verification_uses_arbeitnow_success_state(self) -> None:
         self.assertTrue(

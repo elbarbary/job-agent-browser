@@ -319,6 +319,15 @@ class BrowserEngine:
         if parsed.scheme != "https" or not host_allowed(url, autopilot_config):
             raise BrowserSafetyError("Autopilot submission host is not privately allowlisted.")
         assert_action_allowed(RiskClass.JOB_SUBMIT, confirmed=True)
+        direct_adapter = _direct_ats_adapter_for_url(url)
+        if direct_adapter is not None:
+            return await self._auto_submit_direct_ats(
+                url,
+                job_id,
+                answers,
+                autopilot_config,
+                adapter=direct_adapter,
+            )
         browser = self._new_browser(
             headed=not bool(autopilot_config.get("headless", True)),
             persistent=True,
@@ -458,6 +467,171 @@ class BrowserEngine:
             }
         finally:
             await browser.stop()
+
+    async def _auto_submit_direct_ats(
+        self,
+        url: str,
+        job_id: str,
+        answers: dict[str, Any],
+        autopilot_config: dict[str, Any],
+        *,
+        adapter: str,
+    ) -> dict[str, Any]:
+        """Fast DOM-driven submit path for common ATS pages.
+
+        Browser Use remains the project browser engine, but these high-volume ATS
+        forms are predictable enough that a direct Playwright pass avoids spending
+        the full per-job timeout just discovering fields. Safety is still enforced:
+        unknown required fields, unsafe buttons, and CAPTCHA/challenge pages block.
+        """
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as exc:  # pragma: no cover - installed with Browser Use
+            raise BrowserSafetyError("Playwright is required for direct ATS submissions.") from exc
+
+        errors: list[str] = []
+        fills: list[dict[str, Any]] = []
+        page_url = url
+        page_title = job_id
+        context = None
+        playwright = await async_playwright().start()
+        try:
+            context = await playwright.chromium.launch_persistent_context(
+                str(self.settings.browser_profile_dir),
+                headless=bool(autopilot_config.get("headless", True)),
+                executable_path="/usr/bin/google-chrome",
+                chromium_sandbox=False,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    "--disable-background-networking",
+                ],
+            )
+            page = await context.new_page()
+            page.set_default_timeout(int(autopilot_config.get("direct_ats_action_timeout_ms", 10000)))
+            await page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=int(autopilot_config.get("direct_ats_navigation_timeout_ms", 30000)),
+            )
+            await page.wait_for_timeout(1000)
+            await _open_application_form(page, int(autopilot_config.get("application_navigation_max_steps", 3)))
+            await page.wait_for_timeout(750)
+            page_url = page.url
+            challenge = _decoded_json(await page.evaluate(CHALLENGE_DETECTION_SCRIPT))
+            if _challenge_detected(challenge):
+                errors.append("CAPTCHA or anti-bot challenge detected; human review is required.")
+
+            snapshot = _decoded_json(await page.evaluate(AUTOPILOT_SNAPSHOT_SCRIPT))
+            page_title = str(snapshot.get("title") or job_id)
+            all_fields = list(snapshot.get("fields") or [])
+            fields = all_fields
+            buttons = list(snapshot.get("buttons") or [])
+            submit_button = _choose_submit_button(buttons)
+            submit_index = int(submit_button["index"]) if submit_button else None
+            if submit_button and int(submit_button.get("form_index", -1)) >= 0:
+                fields = [
+                    field
+                    for field in all_fields
+                    if int(field.get("form_index", -1)) == int(submit_button["form_index"])
+                ]
+            fills, planning_errors = _plan_form_fills(fields, answers, autopilot_config)
+            errors.extend(planning_errors)
+            errors.extend(_validate_required_fields(fields, fills, autopilot_config))
+            if not fields:
+                errors.append(f"{adapter} adapter found no visible application form fields.")
+            elif not fills:
+                errors.append(f"{adapter} adapter could not safely fill any fields from known answers.")
+            if submit_index is None:
+                errors.append(f"{adapter} adapter found no safe final submit/apply button.")
+            if errors:
+                screenshot_path = self._save_screenshot_bytes(await page.screenshot(full_page=False), f"{adapter}-blocked")
+                self.recorder.record(
+                    ActionRecord(
+                        run_id=self.recorder.run_id,
+                        workflow="autopilot_submit",
+                        page_url=page_url,
+                        page_title=page_title,
+                        visible_action_candidates=[],
+                        selected_action=f"{adapter}_blocked_before_submit",
+                        risk_classification=RiskClass.JOB_SUBMIT,
+                        input_values={"job_id": job_id, "adapter": adapter, "planned_fills": _audit_fills(fills)},
+                        preconditions=["private autopilot standing authorization exists", f"{adapter} direct adapter selected"],
+                        postconditions=["no submit button was clicked", "direct adapter failed fast"],
+                        screenshot_path=str(screenshot_path),
+                        result="blocked",
+                        errors=errors,
+                        approved=True,
+                    )
+                )
+                return {
+                    "adapter": adapter,
+                    "submitted": False,
+                    "clicked": False,
+                    "blocked": True,
+                    "errors": errors,
+                    "fills": _audit_fills(fills),
+                    "screenshot_path": str(screenshot_path),
+                    "post_submit_url": page_url,
+                }
+
+            file_fills = [fill for fill in fills if fill.get("kind") == "file"]
+            text_fills = [fill for fill in fills if fill.get("kind") != "file"]
+            for fill in file_fills:
+                selector = f'[data-autopilot-field-index="{int(fill["index"])}"]'
+                await page.set_input_files(selector, str(fill["value"]))
+            await page.evaluate(_fill_form_script(text_fills))
+            await page.wait_for_timeout(500)
+            await page.evaluate(_click_submit_script(int(submit_index)))
+            post_state = await _wait_for_submit_result(page)
+            page_url = page.url
+            verified = _submission_verified(post_state)
+            post_errors = [] if verified else _post_submit_errors(post_state) or ["No post-submit confirmation was detected."]
+            screenshot_path = self._save_screenshot_bytes(await page.screenshot(full_page=False), f"{adapter}-submit")
+            self.recorder.record(
+                ActionRecord(
+                    run_id=self.recorder.run_id,
+                    workflow="autopilot_submit",
+                    page_url=page_url,
+                    page_title=page_title,
+                    visible_action_candidates=[],
+                    selected_action=f"{adapter}_click_final_submit_with_private_autopilot_authorization",
+                    risk_classification=RiskClass.JOB_SUBMIT,
+                    input_values={"job_id": job_id, "adapter": adapter, "planned_fills": _audit_fills(fills)},
+                    preconditions=[
+                        "private autopilot standing authorization exists",
+                        f"{adapter} direct adapter selected",
+                        "required fields mapped to known answers",
+                    ],
+                    postconditions=[
+                        "submit/apply button clicked",
+                        "post-submit page checked for confirmation",
+                        "audit screenshot saved",
+                    ],
+                    screenshot_path=str(screenshot_path),
+                    result="submit_confirmed" if verified else "submit_clicked_unverified",
+                    errors=post_errors,
+                    approved=True,
+                )
+            )
+            return {
+                "adapter": adapter,
+                "submitted": verified,
+                "clicked": True,
+                "blocked": False,
+                "verified": verified,
+                "errors": post_errors,
+                "post_submit_url": page_url,
+                "fills": _audit_fills(fills),
+                "post_submit_state": _audit_post_state(post_state),
+                "screenshot_path": str(screenshot_path),
+            }
+        finally:
+            if context is not None:
+                await context.close()
+            await playwright.stop()
 
     async def prepare_application_for_manual_submit(
         self,
@@ -1004,6 +1178,24 @@ def _is_arbeitnow_job_page(url: str) -> bool:
         and path.startswith("/jobs/companies/")
         and not path.endswith("/apply")
     )
+
+
+DIRECT_ATS_HOST_ADAPTERS = {
+    "boards.greenhouse.io": "greenhouse",
+    "boards.eu.greenhouse.io": "greenhouse",
+    "job-boards.greenhouse.io": "greenhouse",
+    "job-boards.eu.greenhouse.io": "greenhouse",
+    "jobs.lever.co": "lever",
+    "jobs.ashbyhq.com": "ashby",
+    "jobs.workable.com": "workable",
+    "apply.workable.com": "workable",
+    "careers.smartrecruiters.com": "smartrecruiters",
+}
+
+
+def _direct_ats_adapter_for_url(url: str) -> str | None:
+    host = (urlparse(url).hostname or "").casefold()
+    return DIRECT_ATS_HOST_ADAPTERS.get(host)
 
 
 def _decoded_json(value: Any) -> Any:
@@ -1787,6 +1979,25 @@ def _choose_submit_button(buttons: list[dict[str, Any]]) -> dict[str, Any] | Non
     return None
 
 
+CHALLENGE_DETECTION_SCRIPT = """() => {
+    const text = (document.body && document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 5000).toLowerCase();
+    const selectors = [
+        'iframe[src*="captcha"]',
+        'iframe[src*="hcaptcha"]',
+        'iframe[src*="recaptcha"]',
+        '[class*="captcha" i]',
+        '[id*="captcha" i]',
+        '[data-sitekey]',
+        '.cf-turnstile',
+    ];
+    return {
+        title: document.title || '',
+        text,
+        selector_match: selectors.some(selector => document.querySelector(selector)),
+    };
+}"""
+
+
 AUTOPILOT_POST_SUBMIT_SCRIPT = """() => ({
     title: document.title || '',
     url: location.href,
@@ -1823,6 +2034,36 @@ ARBEITNOW_POST_SUBMIT_SCRIPT = """() => {
         visible_errors: visibleErrors
     };
 }"""
+
+
+async def _wait_for_submit_result(page: Any) -> Any:
+    post_state: Any = {}
+    for _ in range(16):
+        post_state = _decoded_json(await page.evaluate(AUTOPILOT_POST_SUBMIT_SCRIPT))
+        if _submission_verified(post_state) or _post_submit_errors(post_state):
+            return post_state
+        await page.wait_for_timeout(500)
+    return post_state
+
+
+def _challenge_detected(challenge: Any) -> bool:
+    if not isinstance(challenge, dict):
+        return False
+    if challenge.get("selector_match") is True:
+        return True
+    haystack = " ".join(str(challenge.get(key, "")) for key in ("title", "text")).casefold()
+    return any(
+        marker in haystack
+        for marker in (
+            "captcha",
+            "recaptcha",
+            "hcaptcha",
+            "verify you are human",
+            "checking your browser",
+            "cloudflare",
+            "unusual traffic",
+        )
+    )
 
 
 async def _wait_for_arbeitnow_result(page: Any) -> Any:
