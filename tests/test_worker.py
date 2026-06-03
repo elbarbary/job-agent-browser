@@ -5,7 +5,9 @@ import unittest
 from app.config import Settings
 from app.worker import (
     DEFAULT_AUTOPILOT_JOB_TIMEOUT_SECONDS,
+    DEFAULT_BROWSER_TMP_CLEANUP_AGE_SECONDS,
     DEFAULT_WORKER_CYCLE_TIMEOUT_SECONDS,
+    cleanup_browser_use_temp_dirs,
     _new_worker_status,
     _update_worker_status,
     _discovery_plan,
@@ -104,6 +106,9 @@ class WorkerSelectionTests(unittest.TestCase):
     def test_autopilot_job_timeout_default_is_bounded(self) -> None:
         self.assertGreaterEqual(DEFAULT_AUTOPILOT_JOB_TIMEOUT_SECONDS, 30)
 
+    def test_browser_tmp_cleanup_default_is_conservative(self) -> None:
+        self.assertGreaterEqual(DEFAULT_BROWSER_TMP_CLEANUP_AGE_SECONDS, 60 * 60)
+
     def test_existing_job_ids_reads_json_stems(self) -> None:
         import tempfile
         from pathlib import Path
@@ -126,6 +131,35 @@ class WorkerSelectionTests(unittest.TestCase):
                 _draft_path(settings, "abc123"),
                 settings.applications_dir / "drafts" / "abc123.json",
             )
+
+    def test_cleanup_browser_use_temp_dirs_removes_only_old_generated_dirs(self) -> None:
+        import os
+        import tempfile
+        import time
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_generated = root / "browser-use-user-data-dir-old"
+            old_downloads = root / "browser-use-downloads-old"
+            fresh_generated = root / "browser-use-user-data-dir-fresh"
+            unrelated = root / "candidate-session"
+            for path in (old_generated, old_downloads, fresh_generated, unrelated):
+                path.mkdir()
+            old_time = time.time() - 7200
+            os.utime(old_generated, (old_time, old_time))
+            os.utime(old_downloads, (old_time, old_time))
+
+            with patch("app.worker.tempfile.gettempdir", return_value=tmp):
+                result = cleanup_browser_use_temp_dirs(max_age_seconds=3600)
+
+            self.assertFalse(old_generated.exists())
+            self.assertFalse(old_downloads.exists())
+            self.assertTrue(fresh_generated.exists())
+            self.assertTrue(unrelated.exists())
+            self.assertEqual(len(result["removed"]), 2)
+            self.assertEqual(result["failed"], [])
 
 
 if __name__ == "__main__":

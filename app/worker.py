@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,7 @@ from .whatsapp_notifier import WhatsAppConfigurationError, load_whatsapp_config,
 LOGGER = logging.getLogger("job_agent_worker")
 DEFAULT_WORKER_CYCLE_TIMEOUT_SECONDS = 3600
 DEFAULT_AUTOPILOT_JOB_TIMEOUT_SECONDS = 300
+DEFAULT_BROWSER_TMP_CLEANUP_AGE_SECONDS = 6 * 60 * 60
 
 
 def _job_score(job: dict[str, Any]) -> int:
@@ -61,6 +64,28 @@ def _existing_job_ids(path: Path) -> set[str]:
 
 def _draft_path(settings: Settings, job_id: str) -> Path:
     return settings.applications_dir / "drafts" / f"{job_id}.json"
+
+
+def cleanup_browser_use_temp_dirs(max_age_seconds: int = DEFAULT_BROWSER_TMP_CLEANUP_AGE_SECONDS) -> dict[str, Any]:
+    """Delete stale Browser Use temp profiles without touching persistent sessions."""
+    temp_root = Path(tempfile.gettempdir())
+    now = datetime.now().timestamp()
+    removed: list[str] = []
+    failed: list[dict[str, str]] = []
+    patterns = ("browser-use-user-data-dir-*", "browser-use-downloads-*")
+    for pattern in patterns:
+        for path in temp_root.glob(pattern):
+            try:
+                if not path.is_dir():
+                    continue
+                age = now - path.stat().st_mtime
+                if age < max_age_seconds:
+                    continue
+                shutil.rmtree(path)
+                removed.append(str(path))
+            except Exception as exc:
+                failed.append({"path": str(path), "error": str(exc)})
+    return {"removed": removed, "failed": failed}
 
 
 def setup_logging(settings: Settings) -> Path:
@@ -154,6 +179,7 @@ def _new_worker_status(
 
 async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[str, Any]:
     settings.ensure_directories()
+    cleanup_result = cleanup_browser_use_temp_dirs()
     watchlist = load_watchlist(settings)
     recorder = AuditRecorder(settings.log_dir / "runs")
     repository = ApplicationRepository(settings)
@@ -169,6 +195,10 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
             "run_online_sources": run_online,
             "run_source_urls": run_source_urls,
             "audit_log": str(recorder.path),
+            "browser_tmp_cleanup": {
+                "removed_count": len(cleanup_result["removed"]),
+                "failed": cleanup_result["failed"],
+            },
         }
     )
     _write_worker_status(settings, status)
@@ -266,6 +296,10 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         "autopilot_blocked": [],
         "daily_update": None,
         "audit_log": str(recorder.path),
+        "browser_tmp_cleanup": {
+            "removed_count": len(cleanup_result["removed"]),
+            "failed": cleanup_result["failed"],
+        },
         "errors": errors,
     }
     _write_worker_status(settings, discovery_status)
@@ -453,6 +487,7 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
     _update_worker_status(settings, status, current_autopilot_job_id=None, autopilot_attempt_started_at=None)
 
     report = generate_daily_update(settings)
+    cleanup_result = cleanup_browser_use_temp_dirs()
     status = {
         "generated_at": datetime.now(UTC).isoformat(),
         "updated_at": datetime.now(UTC).isoformat(),
@@ -478,6 +513,10 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         "autopilot_blocked": autopilot_blocked,
         "daily_update": str(report),
         "audit_log": str(recorder.path),
+        "browser_tmp_cleanup": {
+            "removed_count": len(cleanup_result["removed"]),
+            "failed": cleanup_result["failed"],
+        },
         "errors": errors,
     }
     status["finished_at"] = status["updated_at"]
@@ -519,11 +558,16 @@ async def run_forever(settings: Settings, interval_minutes: int | None = None) -
             await asyncio.wait_for(run_once(settings), timeout=timeout_seconds)
         except Exception as exc:
             LOGGER.exception("worker run failed")
+            cleanup_result = cleanup_browser_use_temp_dirs()
             failed_status = _new_worker_status(
                 watchlist=watchlist,
                 phase="failed",
                 in_progress=False,
                 errors=[f"worker run failed: {exc}"],
             )
+            failed_status["browser_tmp_cleanup"] = {
+                "removed_count": len(cleanup_result["removed"]),
+                "failed": cleanup_result["failed"],
+            }
             _write_worker_status(settings, failed_status)
         await asyncio.sleep(max(1, interval) * 60)
