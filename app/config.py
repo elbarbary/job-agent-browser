@@ -127,6 +127,7 @@ class Settings:
             self.applications_dir / "prepared",
             self.applications_dir / "submissions",
             self.applications_dir / "submission_attempts",
+            self.applications_dir / "autopilot_failures",
             self.applications_dir / "gmail_checks",
         )
         for directory in directories:

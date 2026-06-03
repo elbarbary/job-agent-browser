@@ -8,7 +8,10 @@ from app.worker import (
     DEFAULT_BROWSER_TMP_CLEANUP_AGE_SECONDS,
     DEFAULT_WORKER_CYCLE_TIMEOUT_SECONDS,
     cleanup_browser_use_temp_dirs,
+    _autopilot_failure_path,
+    _extract_last_json_object,
     _new_worker_status,
+    _record_autopilot_failure,
     _update_worker_status,
     _discovery_plan,
     _draft_path,
@@ -131,6 +134,39 @@ class WorkerSelectionTests(unittest.TestCase):
                 _draft_path(settings, "abc123"),
                 settings.applications_dir / "drafts" / "abc123.json",
             )
+
+    def test_autopilot_failure_path_points_to_private_directory(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings.load(Path(tmp))
+
+            self.assertEqual(
+                _autopilot_failure_path(settings, "abc123"),
+                settings.applications_dir / "autopilot_failures" / "abc123.json",
+            )
+
+    def test_record_autopilot_failure_writes_private_json(self) -> None:
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings.load(Path(tmp))
+            settings.ensure_directories()
+
+            path = _record_autopilot_failure(settings, "abc123", ["timed out"])
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(payload["job_id"], "abc123")
+            self.assertEqual(payload["reasons"], ["timed out"])
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_extract_last_json_object_ignores_logs(self) -> None:
+        output = 'INFO starting\n{"first": false}\nnoise\n{"submitted": true, "job_id": "abc"}\n'
+
+        self.assertEqual(_extract_last_json_object(output), {"submitted": True, "job_id": "abc"})
 
     def test_cleanup_browser_use_temp_dirs_removes_only_old_generated_dirs(self) -> None:
         import os

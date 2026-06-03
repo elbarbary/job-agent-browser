@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
+import signal
+import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,7 +16,6 @@ from typing import Any
 
 from .autopilot import decide_autopilot_for_job, load_autopilot
 from .application_agent import ApplicationRepository, ApplicationWorkflow
-from .browser_engine import BrowserEngine
 from .config import Settings
 from .cv_store import load_profile
 from .email_notifier import generate_daily_update
@@ -64,6 +66,100 @@ def _existing_job_ids(path: Path) -> set[str]:
 
 def _draft_path(settings: Settings, job_id: str) -> Path:
     return settings.applications_dir / "drafts" / f"{job_id}.json"
+
+
+def _autopilot_failure_path(settings: Settings, job_id: str) -> Path:
+    return settings.applications_dir / "autopilot_failures" / f"{job_id}.json"
+
+
+def _write_private_json(path: Path, payload: Any) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
+def _record_autopilot_failure(
+    settings: Settings,
+    job_id: str,
+    reasons: list[str],
+    *,
+    result: dict[str, Any] | None = None,
+) -> Path:
+    return _write_private_json(
+        _autopilot_failure_path(settings, job_id),
+        {
+            "job_id": job_id,
+            "failed_at": datetime.now(UTC).isoformat(),
+            "execution": "autopilot_blocked_or_timed_out",
+            "reasons": reasons,
+            "result": result or {},
+        },
+    )
+
+
+def _extract_last_json_object(output: str) -> dict[str, Any]:
+    decoder = json.JSONDecoder()
+    parsed: dict[str, Any] = {}
+    for index, char in enumerate(output):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(output[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            parsed = value
+    return parsed
+
+
+async def _run_autopilot_child_process(settings: Settings, job_id: str, timeout_seconds: int) -> dict[str, Any]:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "app.main",
+        "apply",
+        "--job-id",
+        job_id,
+        "--auto-submit",
+        cwd=str(settings.root),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+    except TimeoutError:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(process.wait(), timeout=10)
+        except TimeoutError:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            await process.wait()
+        return {
+            "submitted": False,
+            "blocked": True,
+            "errors": [f"autopilot child process timed out after {timeout_seconds}s"],
+        }
+    stdout_text = stdout.decode("utf-8", errors="replace") if stdout else ""
+    stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
+    result = _extract_last_json_object(stdout_text)
+    if not result:
+        result = {
+            "submitted": False,
+            "blocked": True,
+            "errors": ["autopilot child process produced no JSON result"],
+        }
+    result["returncode"] = process.returncode
+    if stderr_text.strip():
+        result["stderr_tail"] = stderr_text.strip()[-2000:]
+    return result
 
 
 def cleanup_browser_use_temp_dirs(max_age_seconds: int = DEFAULT_BROWSER_TMP_CLEANUP_AGE_SECONDS) -> dict[str, Any]:
@@ -318,7 +414,6 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         30,
         int(autopilot_config.get("autopilot_job_timeout_seconds", DEFAULT_AUTOPILOT_JOB_TIMEOUT_SECONDS)),
     )
-    browser_engine = BrowserEngine(settings, recorder)
     draft_top_n = int(watchlist.get("auto_draft_top_n", 5))
     autopilot_scan_top_n = int(
         watchlist.get("autopilot_scan_top_n", max(draft_top_n, max_autopilot_submits * 3))
@@ -331,6 +426,7 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
         handled_job_ids=(
             _existing_job_ids(settings.applications_dir / "submissions")
             | _existing_job_ids(settings.applications_dir / "submission_attempts")
+            | _existing_job_ids(settings.applications_dir / "autopilot_failures")
         ),
     )
     draft_paths: dict[str, Path] = {}
@@ -421,17 +517,8 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
                 current_autopilot_job_id=job_id,
                 autopilot_attempt_started_at=datetime.now(UTC).isoformat(),
             )
-            result = await asyncio.wait_for(
-                browser_engine.auto_submit_application(
-                    str(job["url"]),
-                    job_id,
-                    draft_payload["answers"],
-                    autopilot_config,
-                ),
-                timeout=autopilot_job_timeout,
-            )
+            result = await _run_autopilot_child_process(settings, job_id, autopilot_job_timeout)
             if result.get("submitted"):
-                workflow.record_autopilot_submission(job_id, result)
                 autopilot_submitted.append(job_id)
                 _update_worker_status(
                     settings,
@@ -441,7 +528,6 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
                     autopilot_attempt_started_at=None,
                 )
             elif result.get("clicked"):
-                workflow.record_autopilot_attempt(job_id, result)
                 autopilot_blocked.append(
                     {"job_id": job_id, "reasons": result.get("errors", ["submit click was unverified"])}
                 )
@@ -453,7 +539,9 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
                     autopilot_attempt_started_at=None,
                 )
             else:
-                autopilot_blocked.append({"job_id": job_id, "reasons": result.get("errors", [])})
+                reasons = [str(item) for item in result.get("errors", [])] or ["autopilot did not submit"]
+                _record_autopilot_failure(settings, job_id, reasons, result=result)
+                autopilot_blocked.append({"job_id": job_id, "reasons": reasons})
                 _update_worker_status(
                     settings,
                     status,
@@ -463,6 +551,7 @@ async def run_once(settings: Settings, *, with_llm: bool | None = None) -> dict[
                 )
         except TimeoutError:
             reason = f"autopilot attempt timed out after {autopilot_job_timeout}s"
+            _record_autopilot_failure(settings, job_id, [reason])
             autopilot_blocked.append({"job_id": job_id, "reasons": [reason]})
             LOGGER.warning("autopilot timed out for %s after %ss", job_id, autopilot_job_timeout)
             _update_worker_status(
