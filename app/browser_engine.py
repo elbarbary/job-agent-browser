@@ -493,11 +493,14 @@ class BrowserEngine:
         fills: list[dict[str, Any]] = []
         page_url = url
         page_title = job_id
+        browser = None
         context = None
         playwright = await async_playwright().start()
         try:
-            context = await playwright.chromium.launch_persistent_context(
-                str(self.settings.browser_profile_dir),
+            # Public ATS application pages should not require the logged-in/manual
+            # browser profile. Using an isolated context avoids Chrome profile
+            # SingletonLock failures when the noVNC review browser is open.
+            browser = await playwright.chromium.launch(
                 headless=bool(autopilot_config.get("headless", True)),
                 executable_path="/usr/bin/google-chrome",
                 chromium_sandbox=False,
@@ -509,6 +512,7 @@ class BrowserEngine:
                     "--disable-background-networking",
                 ],
             )
+            context = await browser.new_context()
             page = await context.new_page()
             page.set_default_timeout(int(autopilot_config.get("direct_ats_action_timeout_ms", 10000)))
             await page.goto(
@@ -631,6 +635,8 @@ class BrowserEngine:
         finally:
             if context is not None:
                 await context.close()
+            if browser is not None:
+                await browser.close()
             await playwright.stop()
 
     async def prepare_application_for_manual_submit(
