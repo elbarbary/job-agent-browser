@@ -107,7 +107,7 @@ class BrowserEngine:
                     risk_classification=RiskClass.READ_ONLY,
                     preconditions=["read-only navigation permitted"],
                     postconditions=precheck.checks if precheck else ["visible elements extracted"],
-                    screenshot_path=str(screenshot_path),
+                    screenshot_path=str(screenshot_path) if screenshot_path else None,
                     result="success" if precheck is None or precheck.passed else "verification_failed",
                     errors=precheck.errors if precheck else [],
                 )
@@ -166,7 +166,7 @@ class BrowserEngine:
                     "captured_at": datetime.now(UTC).isoformat(),
                     "url": page_url,
                     "title": title,
-                    "screenshot_path": str(screenshot_path),
+                    "screenshot_path": str(screenshot_path) if screenshot_path else None,
                 }
             )
             output_dir = self.settings.log_dir / "page_contexts"
@@ -410,7 +410,7 @@ class BrowserEngine:
                         input_values={"job_id": job_id, "planned_fills": _audit_fills(fills)},
                         preconditions=["private autopilot standing authorization exists"],
                         postconditions=["no submit button was clicked"],
-                        screenshot_path=str(screenshot_path),
+                        screenshot_path=str(screenshot_path) if screenshot_path else None,
                         result="blocked",
                         errors=errors,
                         approved=True,
@@ -551,7 +551,8 @@ class BrowserEngine:
             if submit_index is None:
                 errors.append(f"{adapter} adapter found no safe final submit/apply button.")
             if errors:
-                screenshot_path = self._save_screenshot_bytes(await page.screenshot(full_page=False), f"{adapter}-blocked")
+                screenshot_bytes = await _try_page_screenshot(page)
+                screenshot_path = self._save_screenshot_bytes(screenshot_bytes, f"{adapter}-blocked") if screenshot_bytes else None
                 self.recorder.record(
                     ActionRecord(
                         run_id=self.recorder.run_id,
@@ -577,7 +578,7 @@ class BrowserEngine:
                     "blocked": True,
                     "errors": errors,
                     "fills": _audit_fills(fills),
-                    "screenshot_path": str(screenshot_path),
+                    "screenshot_path": str(screenshot_path) if screenshot_path else None,
                     "post_submit_url": page_url,
                 }
 
@@ -593,7 +594,10 @@ class BrowserEngine:
             page_url = page.url
             verified = _submission_verified(post_state)
             post_errors = [] if verified else _post_submit_errors(post_state) or ["No post-submit confirmation was detected."]
-            screenshot_path = self._save_screenshot_bytes(await page.screenshot(full_page=False), f"{adapter}-submit")
+            screenshot_bytes = await _try_page_screenshot(page)
+            screenshot_path = self._save_screenshot_bytes(screenshot_bytes, f"{adapter}-submit") if screenshot_bytes else None
+            if screenshot_path is None:
+                post_errors = post_errors + ["Audit screenshot timed out after submit; submission result was still recorded."]
             self.recorder.record(
                 ActionRecord(
                     run_id=self.recorder.run_id,
@@ -2041,6 +2045,13 @@ ARBEITNOW_POST_SUBMIT_SCRIPT = """() => {
         visible_errors: visibleErrors
     };
 }"""
+
+
+async def _try_page_screenshot(page: Any, *, timeout_ms: int = 5000) -> bytes | None:
+    try:
+        return await page.screenshot(full_page=False, timeout=timeout_ms, animations="disabled")
+    except Exception:
+        return None
 
 
 async def _wait_for_submit_result(page: Any) -> Any:
