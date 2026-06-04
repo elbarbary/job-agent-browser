@@ -28,20 +28,54 @@ need websockify
 mkdir -p "$RUNTIME_DIR" "$PROFILE_DIR"
 chmod 700 "$RUNTIME_DIR" "$PROFILE_DIR"
 
-if [[ -f "$RUNTIME_DIR/xvfb.pid" ]] && ! kill -0 "$(cat "$RUNTIME_DIR/xvfb.pid")" 2>/dev/null; then
-  rm -f "$RUNTIME_DIR"/*.pid
+pid_alive() {
+  local pid_file="$1"
+  [[ -f "$pid_file" ]] || return 1
+  local pid
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+cdp_ready() {
+  curl -fsS "http://127.0.0.1:${CDP_PORT}/json/version" >/dev/null 2>&1
+}
+
+stop_pid_if_matches() {
+  local name="$1"
+  local pattern="$2"
+  local pid_file="$RUNTIME_DIR/${name}.pid"
+  [[ -f "$pid_file" ]] || return 0
+  local pid cmd
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  [[ -n "$pid" ]] || { rm -f "$pid_file"; return 0; }
+  cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  if [[ -n "$cmd" && "$cmd" == *"$pattern"* ]]; then
+    kill "$pid" 2>/dev/null || true
+    sleep 0.3
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  rm -f "$pid_file"
+}
+
+if cdp_ready && pid_alive "$RUNTIME_DIR/chrome.pid"; then
+  echo "Challenge browser is already running."
+  echo "Open via SSH tunnel: ssh -N -L ${NOVNC_PORT}:127.0.0.1:${NOVNC_PORT} barbary@${REMOTE_HOST}"
+  echo "Then visit: http://127.0.0.1:${NOVNC_PORT}/vnc.html?host=127.0.0.1&port=${NOVNC_PORT}&autoconnect=1"
+  exit 0
 fi
+
+# Stale pid files are common after remote sessions drop. Clean only the
+# processes that still look like components this script launched.
+stop_pid_if_matches chrome "google-chrome"
+stop_pid_if_matches novnc "websockify"
+stop_pid_if_matches x11vnc "x11vnc"
+stop_pid_if_matches openbox "openbox"
+stop_pid_if_matches xvfb "Xvfb"
+rm -f "$RUNTIME_DIR"/*.pid
 
 if systemctl --user is-active --quiet job-agent-browser.service 2>/dev/null; then
   systemctl --user stop job-agent-browser.service
   touch "$RUNTIME_DIR/restart-worker-on-stop"
-fi
-
-if [[ -f "$RUNTIME_DIR/xvfb.pid" ]] && kill -0 "$(cat "$RUNTIME_DIR/xvfb.pid")" 2>/dev/null; then
-  echo "Challenge browser already appears to be running."
-  echo "Open via SSH tunnel: ssh -N -L ${NOVNC_PORT}:127.0.0.1:${NOVNC_PORT} barbary@${REMOTE_HOST}"
-  echo "Then visit: http://127.0.0.1:${NOVNC_PORT}/vnc.html?host=127.0.0.1&port=${NOVNC_PORT}&autoconnect=1"
-  exit 0
 fi
 
 Xvfb "$DISPLAY_ID" -screen 0 1920x1080x24 -nolisten tcp >"$RUNTIME_DIR/xvfb.log" 2>&1 &
@@ -69,6 +103,20 @@ DISPLAY="$DISPLAY_ID" google-chrome \
   --disable-dev-shm-usage \
   "$URL" >"$RUNTIME_DIR/chrome.log" 2>&1 &
 echo $! > "$RUNTIME_DIR/chrome.pid"
+
+for _ in {1..40}; do
+  if cdp_ready; then
+    break
+  fi
+  sleep 0.5
+done
+
+if ! cdp_ready; then
+  echo "Chrome started but DevTools did not become ready on 127.0.0.1:${CDP_PORT}." >&2
+  echo "Recent Chrome log:" >&2
+  tail -80 "$RUNTIME_DIR/chrome.log" >&2 || true
+  exit 1
+fi
 
 chmod 600 "$RUNTIME_DIR"/*.pid "$RUNTIME_DIR"/*.log 2>/dev/null || true
 
