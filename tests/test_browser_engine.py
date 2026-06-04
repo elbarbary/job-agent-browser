@@ -41,6 +41,7 @@ class BrowserEngineHelperTests(unittest.TestCase):
         self.assertEqual(_direct_ats_adapter_for_url("https://boards.greenhouse.io/company/jobs/1"), "greenhouse")
         self.assertEqual(_direct_ats_adapter_for_url("https://jobs.ashbyhq.com/company/role"), "ashby")
         self.assertEqual(_direct_ats_adapter_for_url("https://apply.workable.com/company/j/ABC"), "workable")
+        self.assertEqual(_direct_ats_adapter_for_url("https://www.arbeitnow.com/jobs/companies/x/y-1"), "arbeitnow")
         self.assertIsNone(_direct_ats_adapter_for_url("https://example.com/job"))
 
     def test_challenge_detection_blocks_captcha_pages(self) -> None:

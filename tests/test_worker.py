@@ -163,6 +163,13 @@ class WorkerSelectionTests(unittest.TestCase):
             self.assertEqual(payload["reasons"], ["timed out"])
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_extract_last_json_object_prefers_outer_final_object(self) -> None:
+        output = 'log\n{\n  "submitted": false,\n  "fills": [{"index": 2, "kind": "text"}],\n  "errors": ["blocked"]\n}\n'
+        self.assertEqual(
+            _extract_last_json_object(output),
+            {"submitted": False, "fills": [{"index": 2, "kind": "text"}], "errors": ["blocked"]},
+        )
+
     def test_extract_last_json_object_ignores_logs(self) -> None:
         output = 'INFO starting\n{"first": false}\nnoise\n{"submitted": true, "job_id": "abc"}\n'
 

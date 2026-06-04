@@ -1190,6 +1190,7 @@ DIRECT_ATS_HOST_ADAPTERS = {
     "jobs.workable.com": "workable",
     "apply.workable.com": "workable",
     "careers.smartrecruiters.com": "smartrecruiters",
+    "www.arbeitnow.com": "arbeitnow",
 }
 
 

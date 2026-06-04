@@ -104,12 +104,16 @@ def _extract_last_json_object(output: str) -> dict[str, Any]:
     for index, char in enumerate(output):
         if char != "{":
             continue
+        candidate = output[index:].strip()
         try:
-            value, _ = decoder.raw_decode(output[index:])
+            value, end = decoder.raw_decode(candidate)
         except json.JSONDecodeError:
             continue
-        if isinstance(value, dict):
-            parsed = value
+        if not isinstance(value, dict):
+            continue
+        parsed = value
+        if not candidate[end:].strip():
+            return value
     return parsed
 
 

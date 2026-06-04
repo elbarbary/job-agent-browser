@@ -236,6 +236,74 @@ def _run_command(command: list[str], *, cwd: Path, timeout: int = 20, input_text
         return {"ok": False, "returncode": 127, "output": str(exc)}
 
 
+def _challenge_browser_running() -> bool:
+    try:
+        with urlopen("http://127.0.0.1:9223/json/version", timeout=2) as response:  # noqa: S310 - loopback CDP check only.
+            return response.status == 200
+    except Exception:  # noqa: BLE001 - unavailable CDP should simply trigger startup.
+        return False
+
+
+def _extract_last_json_object(text: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    last: dict[str, Any] | None = None
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        candidate = text[index:].strip()
+        try:
+            value, end = decoder.raw_decode(candidate)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, dict):
+            continue
+        last = value
+        if not candidate[end:].strip():
+            return value
+    return last
+
+
+def _prepare_job_for_dashboard(settings: Settings, job_id: str, job_url: str) -> dict[str, Any]:
+    notes: list[str] = []
+    if not _challenge_browser_running():
+        start_result = _run_command(
+            [str(settings.root / "scripts/start_challenge_browser.sh"), job_url or "https://mail.google.com/"],
+            cwd=settings.root,
+            timeout=45,
+            input_text="",
+        )
+        notes.append("Started the private review browser." if start_result.get("ok") else "Could not start the private review browser.")
+        if not start_result.get("ok"):
+            return {
+                "ok": False,
+                "output": "\n".join(notes + [str(start_result.get("output") or "")]).strip(),
+            }
+
+    prepare_result = _run_command(
+        [str(settings.root / ".venv/bin/python"), "-m", "app.main", "apply", "--job-id", job_id, "--prepare"],
+        cwd=settings.root,
+        timeout=600,
+        input_text="",
+    )
+    result_json = _extract_last_json_object(str(prepare_result.get("output") or ""))
+    review_url = ""
+    screenshot_path = ""
+    if isinstance(result_json, dict):
+        review_url = str(result_json.get("manual_review_url") or "")
+        screenshot_path = str(result_json.get("screenshot_path") or "")
+    if prepare_result.get("ok") and review_url:
+        notes.append("Prepared/fill attempt finished. Open the filled browser review link below and press Submit yourself after checking it.")
+        notes.append(f"Review URL: {review_url}")
+        if screenshot_path:
+            notes.append(f"Screenshot: {screenshot_path}")
+    elif prepare_result.get("ok"):
+        notes.append("Prepared/fill attempt finished, but no review URL was returned. Use the open private review browser.")
+    else:
+        notes.append("Prepare/fill failed. The command output below explains why.")
+    output = "\n".join(notes + [str(prepare_result.get("output") or "")]).strip()
+    return {"ok": bool(prepare_result.get("ok")), "output": output}
+
+
 def _worker_runtime(settings: Settings) -> dict[str, Any]:
     active = _run_command(["systemctl", "--user", "is-active", "job-agent-browser.service"], cwd=settings.root)
     status = _run_command(
@@ -462,12 +530,7 @@ def _job_action(settings: Settings, form: dict[str, list[str]]) -> dict[str, Any
         return {"ok": False, "output": str(exc)}
 
     if action == "prepare-job":
-        return _run_command(
-            [str(settings.root / ".venv/bin/python"), "-m", "app.main", "apply", "--job-id", job_id, "--prepare"],
-            cwd=settings.root,
-            timeout=600,
-            input_text="",
-        )
+        return _prepare_job_for_dashboard(settings, job_id, str(job.get("url") or ""))
 
     if action == "generate-cover-letter":
         try:

@@ -9,6 +9,7 @@ from app.application_agent import ApplicationRepository
 from app.config import Settings
 from app.question_queue import add_questions
 from app.tracker import (
+    _extract_last_json_object,
     format_manual_queue,
     format_tracker_chat,
     format_tracker_text,
@@ -26,6 +27,13 @@ from app.tracker import (
 
 
 class TrackerTests(unittest.TestCase):
+    def test_extract_last_json_object_from_prepare_output(self) -> None:
+        output = 'Prepared application saved: /tmp/x\n{"prepared": false}\n{"prepared": true, "manual_review_url": "https://example.test/review", "fills": [{"index": 1}]}'
+        self.assertEqual(
+            _extract_last_json_object(output),
+            {"prepared": True, "manual_review_url": "https://example.test/review", "fills": [{"index": 1}]},
+        )
+
     def test_tracker_combines_jobs_drafts_and_submissions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             settings = Settings.load(Path(tmp))
